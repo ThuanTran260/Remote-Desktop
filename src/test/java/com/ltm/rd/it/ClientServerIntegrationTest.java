@@ -19,6 +19,7 @@ import com.ltm.rd.server.ServerConfig;
 import com.ltm.rd.server.ServerCore;
 import com.ltm.rd.server.ServerPhase;
 import com.ltm.rd.server.ServerSession;
+import com.ltm.rd.server.ServerTestAccess;
 import java.awt.Rectangle;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -122,9 +123,14 @@ class ClientServerIntegrationTest {
 
     private ClientSession client(int cmdPort, int imgPort, String code, Timeouts t, SocketConnector connector,
             ClientHooks hooks) {
+        return client(cmdPort, imgPort, code, t, connector, hooks, ticker);
+    }
+
+    private ClientSession client(int cmdPort, int imgPort, String code, Timeouts t, SocketConnector connector,
+            ClientHooks hooks, Ticker withTicker) {
         ClientConfig cfg = new ClientConfig("127.0.0.1", cmdPort, imgPort, code, t, System::nanoTime);
         ClientSession c = new ClientSession(cfg, generations.incrementAndGet(), executor,
-                new FakeScreenSource(1920, 1080), connector, hooks, ticker, scheduler, cleanup);
+                new FakeScreenSource(1920, 1080), connector, hooks, withTicker, scheduler, cleanup);
         clients.add(c);
         return c;
     }
@@ -480,10 +486,13 @@ class ClientServerIntegrationTest {
         CloseRecorder rec = new CloseRecorder(c);
         ServerSession server = core.sessions().current().orElseThrow();
         long start = System.nanoTime();
-        server.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "test", false)); // closes, no DISCONNECT
+        ServerTestAccess.lifecycle(server).close(new CloseInfo(Packet.DisconnectReason.USER, "test", false)); // closes, no DISCONNECT
         rec.await();
         assertTrue(ms(rec.decidedAtNanos - start) < 500, "EOF must close the client at once, not after liveness");
-        assertEquals("peer closed command channel", rec.info.message());
+        // EOF or, if a PING was unread when the server closed, a reset: either way an EOF cause, never a timeout
+        assertNotEquals(Packet.DisconnectReason.TIMEOUT, rec.info.reason());
+        assertTrue(java.util.Set.of("peer closed command channel", "command channel lost").contains(rec.info.message()),
+                rec.info.message());
         awaitTerminated(c);
         c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
     }
@@ -532,5 +541,75 @@ class ClientServerIntegrationTest {
         assertTrue(device.awaitCall("keyRelease:17"), "the held key must be released");
         c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
         awaitTerminated(c);
+    }
+
+    // ---- fallbacks and isolation -----------------------------------------------------------
+
+    @Test
+    void authReadFallbackEndsTheReadWhenTheTickerIsStalled() throws Exception {
+        RawPeer.Server rs = rawServer();
+        Ticker stalled = new Ticker(Duration.ofHours(1), System::nanoTime); // never ticks within this test
+        try {
+            Timeouts t = timeouts(Duration.ofSeconds(5), Duration.ofMillis(500), Duration.ofSeconds(3),
+                    Duration.ofSeconds(3));
+            AtomicLong connectedAt = new AtomicLong();
+            SocketConnector recording = (s, addr, timeoutMs) -> {
+                SocketConnector.DEFAULT.connect(s, addr, timeoutMs);
+                connectedAt.compareAndSet(0, System.nanoTime());
+            };
+            ClientSession c = client(rs.cmdPort(), rs.imgPort(), "123456", t, recording, ClientHooks.none(), stalled);
+            CloseRecorder rec = new CloseRecorder(c);
+            c.start();
+            assertEquals(PacketType.AUTH, track(rs.acceptCmd()).read().type()); // the server stays silent
+            rec.await();
+            assertEquals("auth timeout", rec.info.message());
+            assertEquals(Packet.DisconnectReason.TIMEOUT, rec.info.reason());
+            assertWindow(ms(rec.decidedAtNanos - connectedAt.get()), 500, 500 + SLACK_MS, "soTimeout fallback");
+            awaitTerminated(c);
+        } finally {
+            stalled.close();
+        }
+    }
+
+    @Test
+    void oldSessionLateCallbacksDoNotTouchTheNewSession() throws Exception {
+        RawPeer.Server rs1 = rawServer();
+        ClientSession a = client(rs1.cmdPort(), rs1.imgPort(), "123456", normal(), SocketConnector.DEFAULT,
+                ClientHooks.none());
+        a.start();
+        rawActive(rs1, a);
+        long oldGeneration = generations.get();
+        a.cancel();
+        awaitTerminated(a);
+        a.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+
+        RawPeer.Server rs2 = rawServer();
+        ClientSession b = client(rs2.cmdPort(), rs2.imgPort(), "123456", normal(), SocketConnector.DEFAULT,
+                ClientHooks.none());
+        b.start();
+        RawPeer cmdB = rawActive(rs2, b);
+        assertEquals(ClientPhase.ACTIVE, b.phase());
+
+        // everything the old session might still do late: close again, tick far in the future, end its generation
+        a.cancel();
+        a.tick(System.nanoTime() + TimeUnit.HOURS.toNanos(1));
+        executor.endSession(oldGeneration).get(WAIT_S, TimeUnit.SECONDS);
+
+        assertEquals(ClientPhase.ACTIVE, b.phase());
+        assertEquals(InputExecutor.State.OPEN, executor.state());
+        assertEquals(1, b.inputBeginCount());
+        cmdB.send(Packet.keyPress(17));
+        assertTrue(device.awaitCall("keyPress:17"), "the new session still drives input");
+    }
+
+    /** Drives a raw server through the handshake until the client is ACTIVE; returns the command peer. */
+    private RawPeer rawActive(RawPeer.Server rs, ClientSession c) throws Exception {
+        RawPeer cmd = rawAuthOk(rs, token());
+        cmd.readUntil(PacketType.SCREEN_INFO);
+        RawPeer img = track(rs.acceptImg());
+        assertEquals(PacketType.ATTACH, img.read().type());
+        cmd.send(Packet.sessionActive());
+        c.activated().get(WAIT_S, TimeUnit.SECONDS);
+        return cmd;
     }
 }

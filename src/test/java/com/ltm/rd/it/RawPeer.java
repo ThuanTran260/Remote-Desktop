@@ -16,32 +16,37 @@ import java.net.Socket;
 import java.util.EnumSet;
 
 /** One end of a raw connection that speaks PacketIO directly, for tests that play the other side. */
-final class RawPeer implements AutoCloseable {
+public final class RawPeer implements AutoCloseable {
     private static final int READ_TIMEOUT_MS = 10_000;
 
-    final Socket socket;
-    final DataInputStream in;
-    final DataOutputStream out;
+    public final Socket socket;
+    public final DataInputStream in;
+    public final DataOutputStream out;
 
-    RawPeer(Socket socket) throws IOException {
+    public RawPeer(Socket socket) throws IOException {
         this.socket = socket;
         socket.setSoTimeout(READ_TIMEOUT_MS);
         this.in = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
         this.out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
     }
 
-    void send(Packet p) throws IOException {
+    /** Connects to a loopback port. */
+    public static RawPeer connect(int port) throws IOException {
+        return new RawPeer(new Socket(InetAddress.getLoopbackAddress(), port));
+    }
+
+    public void send(Packet p) throws IOException {
         PacketIO.write(out, p);
         out.flush();
     }
 
-    Packet read() throws IOException {
+    public Packet read() throws IOException {
         return PacketIO.read(in, Protocol.CMD_MAX_LEN, EnumSet.allOf(PacketType.class))
                 .orElseThrow(() -> new EOFException("peer closed"));
     }
 
     /** Reads until a packet of {@code type} arrives, skipping PING/PONG. */
-    Packet readUntil(PacketType type) throws IOException {
+    public Packet readUntil(PacketType type) throws IOException {
         while (true) {
             Packet p = read();
             if (p.type() == type) return p;
@@ -61,30 +66,30 @@ final class RawPeer implements AutoCloseable {
     }
 
     /** A loopback server on two ephemeral ports, accepting on the caller's thread. */
-    static final class Server implements AutoCloseable {
+    public static final class Server implements AutoCloseable {
         private final ServerSocket cmd;
         private final ServerSocket img;
 
-        Server() throws IOException {
+        public Server() throws IOException {
             cmd = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
             img = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
             cmd.setSoTimeout(READ_TIMEOUT_MS);
             img.setSoTimeout(READ_TIMEOUT_MS);
         }
 
-        int cmdPort() {
+        public int cmdPort() {
             return cmd.getLocalPort();
         }
 
-        int imgPort() {
+        public int imgPort() {
             return img.getLocalPort();
         }
 
-        RawPeer acceptCmd() throws IOException {
+        public RawPeer acceptCmd() throws IOException {
             return new RawPeer(cmd.accept());
         }
 
-        RawPeer acceptImg() throws IOException {
+        public RawPeer acceptImg() throws IOException {
             return new RawPeer(img.accept());
         }
 

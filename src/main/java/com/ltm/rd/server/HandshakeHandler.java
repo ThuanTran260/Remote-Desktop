@@ -32,15 +32,17 @@ final class HandshakeHandler {
     private final Timeouts timeouts;
     private final LongSupplier clock;
     private final Consumer<ServerSession> onReserved;
+    private final Runnable beforeAttachImage; // test seam, may be null
 
     /** {@code onReserved} runs right after a successful reservation, before AUTH_RESULT is sent. */
     HandshakeHandler(SessionManager sessions, PendingConnections pending, Timeouts timeouts, LongSupplier clock,
-            Consumer<ServerSession> onReserved) {
+            Consumer<ServerSession> onReserved, Runnable beforeAttachImage) {
         this.sessions = sessions;
         this.pending = pending;
         this.timeouts = timeouts;
         this.clock = clock;
         this.onReserved = onReserved;
+        this.beforeAttachImage = beforeAttachImage;
     }
 
     void handle(Kind kind, PendingConnection pc) {
@@ -87,6 +89,7 @@ final class HandshakeHandler {
         if (first.isEmpty()) return;
         Optional<ServerSession> current = sessions.current();
         if (current.isEmpty()) return;
+        if (beforeAttachImage != null) beforeAttachImage.run();
         // REJECTED falls through to finally, which closes only this socket
         current.get().attachImage(first.get().attachPayload(), pc, ch, clock.getAsLong());
     }
@@ -95,7 +98,8 @@ final class HandshakeHandler {
     private void delayWrongCode(PendingConnection pc) {
         long delay = timeouts.wrongCodeDelay().toNanos();
         long remaining = pc.acceptedAtNanos() + timeouts.handshake().toNanos() - clock.getAsLong();
-        long wait = Math.min(delay, remaining);
+        // leave one tick so AUTH_RESULT is written before the pending-connection sweep closes the socket
+        long wait = Math.min(delay, remaining - timeouts.tick().toNanos());
         if (wait <= 0) return;
         try {
             TimeUnit.NANOSECONDS.sleep(wait);

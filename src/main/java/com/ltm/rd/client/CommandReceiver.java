@@ -38,7 +38,9 @@ public final class CommandReceiver {
     /** Handles PING and the input packets; other types are the session's business. */
     public void handle(SessionLifecycle.Tx<ClientPhase> tx, Packet p) {
         if (p.type() == PacketType.PING) {
-            writer.offer(Packet.pong(p.seq()));
+            if (writer.offer(Packet.pong(p.seq())) == CommandWriter.OfferResult.OVERFLOW) {
+                tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
+            }
             return;
         }
         if (tx.isClosed()) return;

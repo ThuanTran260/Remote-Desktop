@@ -224,11 +224,17 @@ public final class ClientSession implements Tickable {
         if (!entered) return;
 
         Channel cmdChannel = Channel.wrap(cmd, new TrafficCounter()); // once, before the first packet
+        cmd.setSoTimeout((int) timeouts.clientAuth().toMillis()); // fallback if the deadline tick is late
         lifecycle.addStopHook(cmdChannel::closeWrappersQuietly);
         PacketIO.write(cmdChannel.out(), Packet.auth(cfg.code()));
         cmdChannel.out().flush();
-        Optional<Packet> reply = PacketIO.read(cmdChannel.in(), Protocol.CMD_MAX_LEN,
-                EnumSet.of(PacketType.AUTH_RESULT));
+        Optional<Packet> reply;
+        try {
+            reply = PacketIO.read(cmdChannel.in(), Protocol.CMD_MAX_LEN, EnumSet.of(PacketType.AUTH_RESULT));
+        } catch (SocketTimeoutException e) {
+            lifecycle.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "auth timeout", true));
+            return;
+        }
         if (reply.isEmpty()) {
             lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "server closed connection", false));
             return;
@@ -269,11 +275,6 @@ public final class ClientSession implements Tickable {
         return lifecycle.atomically(tx -> {
             if (!tx.advance(ClientPhase.AUTHENTICATING, ClientPhase.ATTACHING)) return false;
             activationDeadlineNanos = cfg.nanoClock().getAsLong() + timeouts.clientActivation().toNanos();
-            try {
-                ch.socket().setSoTimeout((int) timeouts.cmdSoTimeout().toMillis());
-            } catch (java.net.SocketException e) {
-                throw new IllegalStateException("cannot set command read timeout", e);
-            }
             CommandWriter w = new CommandWriter(ch.out(), CommandWriter.DEFAULT_CAPACITY, Thread::new,
                     e -> lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR,
                             "command write failed", false)),
@@ -291,11 +292,20 @@ public final class ClientSession implements Tickable {
             heartbeat = hb;
             lifecycle.addStopHook(w::stop); // after workers are interrupted and sockets closed
             w.offer(Packet.screenInfo(bounds.width, bounds.height));
+            tx.after(() -> setCommandReadTimeout(ch)); // before the reader starts; not under the lock
             tx.after(() -> w.start(lifecycle::startWorker));
             tx.after(() -> lifecycle.startWorker("rd-cmd-reader", () -> readLoop(ch)));
             tx.after(() -> registerTickables(hb, dog));
             return true;
         });
+    }
+
+    private void setCommandReadTimeout(Channel ch) {
+        try {
+            ch.socket().setSoTimeout((int) timeouts.cmdSoTimeout().toMillis());
+        } catch (java.net.SocketException e) {
+            lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "cannot set read timeout", false));
+        }
     }
 
     private void registerTickables(Heartbeat hb, WriteWatchdog dog) {

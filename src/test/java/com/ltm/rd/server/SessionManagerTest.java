@@ -264,11 +264,13 @@ class SessionManagerTest {
     void factoryCalledWithoutStartingAnything() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         List<ServerSession> created = new ArrayList<>();
+        com.ltm.rd.common.Ticker ticker = new com.ltm.rd.common.Ticker(Duration.ofSeconds(60), System::nanoTime);
         Thread caller = Thread.currentThread();
         SessionManager.SessionFactory spy = (generation, token, peer, reservedAt) -> {
             calls.incrementAndGet();
             assertSame(caller, Thread.currentThread(), "constructs on the caller, starts no thread");
             ServerSession session = newSession(generation, token, peer, reservedAt);
+            assertEquals(0, ticker.registrations(), "the factory must not register a ticker");
             created.add(session);
             return session;
         };
@@ -276,6 +278,8 @@ class SessionManagerTest {
         SessionManager m = manager(new SecureRandom(), spy);
         ServerSession session = m.tryReserve(ip(1), 1, m.currentCode()).session();
         assertEquals(1, calls.get());
+        assertEquals(0, ticker.registrations(), "registering the ticker is the caller's job, after tryReserve");
+        ticker.close();
         assertSame(created.get(0), session);
         assertEquals(s(7), session.reservedAtNanos());
         assertEquals(ServerPhase.RESERVED, session.lifecycle().phase());

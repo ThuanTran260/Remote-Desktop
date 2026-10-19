@@ -174,6 +174,17 @@ class CommandReceiverTest {
     }
 
     @Test
+    void pongThatOverflowsTheWriterQueueClosesTheSession() {
+        CommandWriter tiny = new CommandWriter(new DataOutputStream(new ByteArrayOutputStream()), 1, Thread::new,
+                t -> {}, System::nanoTime);
+        writers.add(tiny);
+        assertEquals(CommandWriter.OfferResult.ACCEPTED, tiny.offer(Packet.ping(1))); // the queue is now full
+        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ATTACHING);
+        handle(lc, receiver(1, tiny), Packet.ping(2));
+        assertEquals(Packet.DisconnectReason.OVERFLOW, lc.closeInfo().orElseThrow().reason());
+    }
+
+    @Test
     void pingAnsweredWithPong() throws Exception {
         CountDownLatch flushed = new CountDownLatch(1);
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();

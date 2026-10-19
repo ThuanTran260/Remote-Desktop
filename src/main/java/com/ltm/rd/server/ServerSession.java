@@ -32,12 +32,12 @@ import java.util.function.LongSupplier;
  * never logged.
  */
 public final class ServerSession implements Tickable {
-    public enum AttachResult { ATTACHED, REJECTED }
+    enum AttachResult { ATTACHED, REJECTED }
 
     /** Collaborators a session needs besides its identity; {@code ticker} may be null in unit tests. */
-    public record Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
+    record Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
             Runnable afterTokenCheck) {
-        public Env {
+        Env {
             Objects.requireNonNull(timeouts);
             Objects.requireNonNull(clock);
             Objects.requireNonNull(shuttingDown);
@@ -67,12 +67,12 @@ public final class ServerSession implements Tickable {
 
     private volatile Heartbeat heartbeat;
 
-    public ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
+    ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
             SessionLifecycle<ServerPhase> lifecycle) {
         this(generation, token, peer, reservedAtNanos, lifecycle, Env.standalone());
     }
 
-    public ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
+    ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
             SessionLifecycle<ServerPhase> lifecycle, Env env) {
         this.generation = generation;
         this.token = Objects.requireNonNull(token).clone();
@@ -91,7 +91,7 @@ public final class ServerSession implements Tickable {
         return token.clone();
     }
 
-    public SessionLifecycle<ServerPhase> lifecycle() {
+    SessionLifecycle<ServerPhase> lifecycle() {
         return lifecycle;
     }
 
@@ -132,15 +132,10 @@ public final class ServerSession implements Tickable {
      * Takes over the command channel after AUTH_RESULT(OK) was sent. Everything is decided in one
      * transaction; the worker starts and ticker registrations run after the lock is released.
      */
-    public boolean attachCommandChannel(PendingConnection pc, Channel ch, long now) {
+    boolean attachCommandChannel(PendingConnection pc, Channel ch, long now) {
         return lifecycle.atomically(tx -> {
             if (cmdChannel != null) return false;
             if (!pc.handOver(now, env.timeouts().handshake(), tx)) return false;
-            try {
-                ch.socket().setSoTimeout((int) env.timeouts().cmdSoTimeout().toMillis());
-            } catch (SocketException e) {
-                throw new IllegalStateException("cannot set command read timeout", e);
-            }
             CommandWriter w = new CommandWriter(ch.out(), CommandWriter.DEFAULT_CAPACITY, Thread::new,
                     e -> lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR,
                             "command write failed", false)),
@@ -162,12 +157,26 @@ public final class ServerSession implements Tickable {
                 w.stop();
                 ch.closeWrappersQuietly();
             });
+            tx.after(() -> setCommandReadTimeout(ch)); // before the reader starts; not under the lock
             tx.after(() -> w.start(lifecycle::startWorker));
             tx.after(() -> lifecycle.startWorker("rd-cmd-reader", () -> readLoop(ch)));
             tx.after(() -> registerTickables(hb, dog));
             maybeActivate(tx, now);
             return true;
         });
+    }
+
+    private void setCommandReadTimeout(Channel ch) {
+        setReadTimeout(ch, env.timeouts().cmdSoTimeout());
+    }
+
+    /** Replaces the handshake soTimeout once a channel belongs to the session; outside the lock. */
+    private void setReadTimeout(Channel ch, java.time.Duration timeout) {
+        try {
+            ch.socket().setSoTimeout((int) timeout.toMillis());
+        } catch (SocketException e) {
+            lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "cannot set read timeout", false));
+        }
     }
 
     private void registerTickables(Heartbeat hb, WriteWatchdog dog) {
@@ -203,7 +212,7 @@ public final class ServerSession implements Tickable {
     }
 
     /** Applies one packet received on the command channel, per the phase table of spec 2.4. */
-    public void dispatch(Packet p) {
+    void dispatch(Packet p) {
         long now = env.clock().getAsLong();
         boolean accepted = lifecycle.atomically(tx -> {
             if (tx.isClosed()) return false;
@@ -223,7 +232,9 @@ public final class ServerSession implements Tickable {
                     maybeActivate(tx, now);
                 }
                 case PING -> {
-                    if (writer != null) writer.offer(Packet.pong(p.seq()));
+                    if (writer != null && writer.offer(Packet.pong(p.seq())) == CommandWriter.OfferResult.OVERFLOW) {
+                        tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
+                    }
                 }
                 case DISCONNECT -> tx.close(new CloseInfo(p.disconnectPayload().reason(), "peer disconnected", false));
                 default -> { }
@@ -245,7 +256,7 @@ public final class ServerSession implements Tickable {
      * yet, hand-over. Only a successful hand-over marks the session attached, so any rejection
      * leaves the token usable.
      */
-    public AttachResult attachImage(Packet.AttachPayload p, PendingConnection pc, Channel ch, long now) {
+    AttachResult attachImage(Packet.AttachPayload p, PendingConnection pc, Channel ch, long now) {
         return lifecycle.atomically(tx -> {
             if (p.version() != Protocol.VERSION) return AttachResult.REJECTED;
             if (tx.isClosed()) return AttachResult.REJECTED;
@@ -257,6 +268,7 @@ public final class ServerSession implements Tickable {
             if (imageChannel != null) return AttachResult.REJECTED;
             if (!pc.handOver(now, env.timeouts().handshake(), tx)) return AttachResult.REJECTED;
             imageChannel = ch;
+            tx.after(() -> setReadTimeout(ch, env.timeouts().imgSoTimeout()));
             lifecycle.addStopHook(ch::closeWrappersQuietly);
             maybeActivate(tx, now);
             return AttachResult.ATTACHED;
@@ -273,8 +285,10 @@ public final class ServerSession implements Tickable {
     private void maybeActivate(SessionLifecycle.Tx<ServerPhase> tx, long now) {
         if (writer == null || screen == null || imageChannel == null) return;
         if (tx.isClosed() || tx.phase() != ServerPhase.RESERVED || reserveExpired(now)) return;
-        if (writer.offer(Packet.sessionActive()) == CommandWriter.OfferResult.ACCEPTED) {
-            tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE);
+        switch (writer.offer(Packet.sessionActive())) {
+            case ACCEPTED -> tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE);
+            case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
+            default -> { } // CLOSED or COALESCED: the session is already going away
         }
     }
 }

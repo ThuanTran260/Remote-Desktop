@@ -35,10 +35,15 @@ public final class ServerCore implements AutoCloseable {
     private static final int POOL_QUEUE = 8;
     private static final long CLOSE_WAIT_MS = 5000;
 
-    /** Hooks for tests; {@link #none()} in production. Either value may be null. */
-    public record Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck) {
-        public static Seams none() {
-            return new Seams(null, null);
+    /**
+     * Hooks for tests in this package; {@link #none()} in production. The runnables may be null.
+     * {@code afterTokenCheck} runs inside the session lock, {@code beforeAttachImage} outside any
+     * lock; {@code pendingTickDisabled} leaves pending connections to their soTimeout fallback.
+     */
+    record Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
+            boolean pendingTickDisabled) {
+        static Seams none() {
+            return new Seams(null, null, null, false);
         }
     }
 
@@ -65,7 +70,7 @@ public final class ServerCore implements AutoCloseable {
         this(config, Seams.none());
     }
 
-    public ServerCore(ServerConfig config, Seams seams) {
+    ServerCore(ServerConfig config, Seams seams) {
         this.config = Objects.requireNonNull(config);
         this.seams = Objects.requireNonNull(seams);
         this.timeouts = config.timeouts();
@@ -73,7 +78,7 @@ public final class ServerCore implements AutoCloseable {
         this.pending = new PendingConnections(timeouts.handshake());
         this.sessions = new SessionManager(config.random(),
                 new AuthGuard(1024, 3, timeouts.ipLock()), timeouts, clock, this::createSession);
-        this.handler = new HandshakeHandler(sessions, pending, timeouts, clock, this::onReserved);
+        this.handler = new HandshakeHandler(sessions, pending, timeouts, clock, this::onReserved, seams.beforeAttachImage());
     }
 
     public SessionManager sessions() {
@@ -96,6 +101,7 @@ public final class ServerCore implements AutoCloseable {
 
     /** Binds both ports (if one fails the other is released) and starts accepting. */
     public void start() throws IOException {
+        if (closed.get()) throw new IllegalStateException("server is closed");
         if (!started.compareAndSet(false, true)) throw new IllegalStateException("already started");
         ServerSocket cmd = null;
         ServerSocket img = null;
@@ -113,7 +119,7 @@ public final class ServerCore implements AutoCloseable {
         cleanup = Executors.newCachedThreadPool(factory("rd-cleanup-", true));
         Ticker t = new Ticker(timeouts.tick(), clock);
         ticker = t;
-        t.register(pending);
+        if (!seams.pendingTickDisabled()) t.register(pending);
         pool = new ThreadPoolExecutor(POOL_THREADS, POOL_THREADS, 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(POOL_QUEUE), factory("rd-handshake-", true), rejectionHandler());
         acceptCmd = startAcceptor("rd-accept-cmd", cmd, HandshakeHandler.Kind.COMMAND);
@@ -189,6 +195,7 @@ public final class ServerCore implements AutoCloseable {
             pending.add(pc);
             try {
                 socket.setTcpNoDelay(true);
+                socket.setSoTimeout((int) timeouts.handshake().toMillis()); // fallback if the sweep is late
                 pool.execute(new HandshakeTask(kind, pc)); // a full pool closes the socket in the handler
             } catch (Throwable e) {
                 pc.closeIfPending();
@@ -211,9 +218,10 @@ public final class ServerCore implements AutoCloseable {
 
     /** After tryReserve returned: start the reserve deadline and free the slot once sockets are closed. */
     private void onReserved(ServerSession session) {
+        // wired first: if anything below failed, the slot would otherwise never be freed
+        session.lifecycle().socketsClosed().thenRun(() -> sessions.onSessionSocketsClosed(session));
         Ticker.Registration registration = ticker.register(session);
         session.lifecycle().addStopHook(registration::close);
-        session.lifecycle().socketsClosed().thenRun(() -> sessions.onSessionSocketsClosed(session));
     }
 
     /**
@@ -232,6 +240,9 @@ public final class ServerCore implements AutoCloseable {
         if (session != null) {
             session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.SHUTDOWN, "server shutting down", true));
         }
+        // acceptors first: nothing can be added to the pool or the pending set after they are gone
+        join(acceptCmd, deadline);
+        join(acceptImg, deadline);
         pending.closeAll();
         ThreadPoolExecutor p = pool;
         if (p != null) {
@@ -240,8 +251,6 @@ public final class ServerCore implements AutoCloseable {
             }
             awaitQuietly(() -> p.awaitTermination(remainingMs(deadline, 1000), TimeUnit.MILLISECONDS));
         }
-        join(acceptCmd, deadline);
-        join(acceptImg, deadline);
         if (session != null) {
             awaitQuietly(() -> session.lifecycle().terminated().get(remainingMs(deadline, 3000), TimeUnit.MILLISECONDS));
         }
