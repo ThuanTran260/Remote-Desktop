@@ -14,8 +14,8 @@ public record LaunchOptions(Role role, boolean help, int cmdPort, int imgPort, S
     public static final String USAGE = """
             Usage: java -jar remote-desktop.jar [--server | --client] [options]
 
-              --server          run as server (screen source)
-              --client          run as client (viewer/controller)
+              --server          run on the controlling machine (listens, views and controls)
+              --client          run on the controlled machine (shares its screen)
               (neither)         show the role chooser
               --cmd-port N      command port, 1..65535 (default 5001)
               --img-port N      image port, 1..65535 (default 5000)

@@ -128,4 +128,19 @@ class LaunchOptionsTest {
     void nullArgsRejected() {
         assertThrows(IllegalArgumentException.class, () -> LaunchOptions.parse(null));
     }
+
+    @Test
+    void usageDescribesRolesCorrectly() {
+        String serverLine = usageLine("--server");
+        String clientLine = usageLine("--client");
+        assertTrue(serverLine.contains("controlling machine"), serverLine);
+        assertTrue(clientLine.contains("controlled machine"), clientLine);
+    }
+
+    private static String usageLine(String flag) {
+        return LaunchOptions.USAGE.lines()
+                .filter(l -> l.stripLeading().startsWith(flag + " "))
+                .findFirst()
+                .orElseThrow();
+    }
 }
