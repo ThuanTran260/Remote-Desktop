@@ -92,8 +92,8 @@ public final class SessionLifecycle<P extends Enum<P>> {
         this(initial, closing, nanoClock, closeGrace, scheduler, cleanup, Thread::new);
     }
 
-    /** Test seam: the thread factory lets tests intercept thread creation and start. */
-    SessionLifecycle(P initial, P closing, LongSupplier nanoClock, Duration closeGrace,
+    /** Seam for tests in other packages: the factory lets them intercept thread creation and start. */
+    public SessionLifecycle(P initial, P closing, LongSupplier nanoClock, Duration closeGrace,
             ScheduledExecutorService scheduler, Executor cleanup, ThreadFactory threadFactory) {
         this.phase = Objects.requireNonNull(initial);
         this.closingPhase = Objects.requireNonNull(closing);
