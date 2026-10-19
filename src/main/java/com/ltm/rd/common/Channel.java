@@ -5,7 +5,9 @@ import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.Socket;
+import java.util.function.UnaryOperator;
 
 /**
  * A socket with its stream wrappers. The wrappers are created once and handed over as a unit
@@ -14,10 +16,19 @@ import java.net.Socket;
 public record Channel(Socket socket, DataInputStream in, DataOutputStream out) {
 
     public static Channel wrap(Socket socket, TrafficCounter counter) throws IOException {
+        return wrap(socket, counter, UnaryOperator.identity());
+    }
+
+    /**
+     * As {@link #wrap(Socket, TrafficCounter)}, but {@code outputDecorator} wraps the raw socket
+     * output before it is counted and buffered (e.g. a throttle in tests); still one wrapper set.
+     */
+    public static Channel wrap(Socket socket, TrafficCounter counter, UnaryOperator<OutputStream> outputDecorator)
+            throws IOException {
         DataInputStream in = new DataInputStream(
                 new BufferedInputStream(counter.countingInput(socket.getInputStream())));
-        DataOutputStream out = new DataOutputStream(
-                new BufferedOutputStream(counter.countingOutput(socket.getOutputStream())));
+        OutputStream raw = outputDecorator.apply(socket.getOutputStream());
+        DataOutputStream out = new DataOutputStream(new BufferedOutputStream(counter.countingOutput(raw)));
         return new Channel(socket, in, out);
     }
 
