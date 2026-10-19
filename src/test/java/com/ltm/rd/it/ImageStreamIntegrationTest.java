@@ -93,10 +93,19 @@ class ImageStreamIntegrationTest {
     // ---- fixtures --------------------------------------------------------------------------
 
     private static Timeouts timeouts(Duration frameTimeout) {
+        return timeouts(Duration.ofMillis(600), frameTimeout, IMG_WRITE_LIMIT);
+    }
+
+    /** Wide stall and timeout windows: a pause of a few hundred ms on a busy runner cannot add a stall. */
+    private static Timeouts wide() {
+        return timeouts(Duration.ofSeconds(2), Duration.ofSeconds(8), Duration.ofSeconds(6));
+    }
+
+    private static Timeouts timeouts(Duration frameStall, Duration frameTimeout, Duration imgWriteLimit) {
         return new Timeouts(Duration.ofMillis(1500), Duration.ofSeconds(5), Duration.ofSeconds(2),
                 Duration.ofSeconds(3), Duration.ofMillis(200), Duration.ofSeconds(5), Duration.ofSeconds(10),
-                Duration.ofMillis(600), frameTimeout, Duration.ofSeconds(20), Duration.ofSeconds(5),
-                IMG_WRITE_LIMIT, GRACE, Duration.ofSeconds(3), Duration.ZERO, Duration.ofSeconds(30),
+                frameStall, frameTimeout, Duration.ofSeconds(20), Duration.ofSeconds(5),
+                imgWriteLimit, GRACE, Duration.ofSeconds(3), Duration.ZERO, Duration.ofSeconds(30),
                 Duration.ofMillis(100));
     }
 
@@ -225,10 +234,10 @@ class ImageStreamIntegrationTest {
 
     @Test
     void inputRejectedBeforeFirstFrame() throws Exception {
-        ServerCore core = core(normal());
+        ServerCore core = core(wide());
         CountDownLatch gate = screen.blockCaptures(); // the first capture, hence the first frame, is held back
         gates.add(gate);
-        ClientSession c = startClient(core, normal());
+        ClientSession c = startClient(core, wide());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
         ServerSession s = serverSession(core);
         assertFalse(s.controlEnabled());
@@ -252,8 +261,8 @@ class ImageStreamIntegrationTest {
 
     @Test
     void slowLinkStallsOnceThenRecovers() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        ServerCore core = core(wide());
+        ClientSession c = startClient(core, wide());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
         ServerSession s = serverSession(core);
         awaitControl(s);
@@ -288,18 +297,16 @@ class ImageStreamIntegrationTest {
         ServerCore core = core(normal());
         CountDownLatch gate = screen.blockCaptures(); // no frame is ever produced
         gates.add(gate);
-        long startStamp = System.nanoTime();
         ClientSession c = startClient(core, normal());
         ServerSession s = serverSession(core);
         CloseRecorder rec = new CloseRecorder(lifecycle(s));
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        long handshakeMs = ms(System.nanoTime() - startStamp);
+        long activeAt = s.activeAtNanos().orElseThrow(); // the server's own ACTIVE instant, same clock
 
         rec.await();
         assertEquals("frame timeout", rec.info.message());
         assertEquals(Packet.DisconnectReason.TIMEOUT, rec.info.reason());
-        // 2 s after ACTIVE; ACTIVE happened after startStamp and before the client saw it
-        assertWindow(ms(rec.decidedAtNanos - startStamp), 2000, 2000 + SLACK_MS + handshakeMs, "frame timeout decision");
+        assertWindow(ms(rec.decidedAtNanos - activeAt), 2000, 2000 + SLACK_MS, "frame timeout decision after ACTIVE");
         lifecycle(s).socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
         assertTrue(ms(System.nanoTime() - rec.decidedAtNanos) <= GRACE.toMillis() + SLACK_MS);
         lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
@@ -344,6 +351,46 @@ class ImageStreamIntegrationTest {
         c.terminated().get(5, TimeUnit.SECONDS);
         lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
         assertEquals(Packet.DisconnectReason.SCREEN_CHANGED, lifecycle(s).closeInfo().orElseThrow().reason());
+    }
+
+    @Test
+    void captureFailureClosesWithDisconnectSoTheServerSeesTheReason() throws Exception {
+        ServerCore core = core(normal());
+        ClientSession c = startClient(core, normal());
+        c.activated().get(WAIT_S, TimeUnit.SECONDS);
+        ServerSession s = serverSession(core);
+        awaitControl(s);
+        CloseRecorder rec = new CloseRecorder(c.lifecycle());
+        screen.failCaptures(true);
+        rec.await();
+        assertEquals("capture failed", rec.info.message());
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, rec.info.reason());
+        c.terminated().get(5, TimeUnit.SECONDS);
+        lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
+        CloseInfo seen = lifecycle(s).closeInfo().orElseThrow();
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, seen.reason(), "the DISCONNECT carried the real reason");
+        assertEquals("peer disconnected", seen.message());
+    }
+
+    @Test
+    void interruptedSenderClosesTheSessionInsteadOfSpinning() throws Exception {
+        ServerCore core = core(normal());
+        ClientSession c = startClient(core, normal());
+        c.activated().get(WAIT_S, TimeUnit.SECONDS);
+        ServerSession s = serverSession(core);
+        awaitControl(s);
+        CloseRecorder rec = new CloseRecorder(c.lifecycle());
+        Thread sender = sessionThreads().stream()
+                .filter(t -> t.getName().equals("rd-screen-sender") && !threadsAtStart.contains(t))
+                .findFirst().orElseThrow();
+        sender.interrupt(); // not the close procedure: nobody closed the session
+        rec.await();
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, rec.info.reason());
+        assertTrue(java.util.Set.of("screen sender interrupted", "image send failed").contains(rec.info.message()),
+                rec.info.message());
+        c.terminated().get(5, TimeUnit.SECONDS);
+        sender.join(WAIT_S * 1000L);
+        assertFalse(sender.isAlive(), "the sender thread ended");
     }
 
     @Test

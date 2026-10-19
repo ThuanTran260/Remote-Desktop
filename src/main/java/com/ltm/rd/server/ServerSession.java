@@ -78,6 +78,7 @@ public final class ServerSession implements Tickable {
     private long framesReceived;
     private long releaseAllSent;
 
+    private volatile long activeAtNanos;
     private volatile boolean framesExpected; // cheap pre-check for the ticker; true once ACTIVE
     private volatile Heartbeat heartbeat;
     private final CopyOnWriteArrayList<ObserverSlot> observers = new CopyOnWriteArrayList<>();
@@ -322,6 +323,7 @@ public final class ServerSession implements Tickable {
     /** Inside the activation transaction: start the frame monitor and, after unlock, the receiver. */
     private void onActive(SessionLifecycle.Tx<ServerPhase> tx, long now) {
         monitor = new FrameMonitor(now, env.timeouts().frameStall(), env.timeouts().frameTimeout());
+        activeAtNanos = now;
         framesExpected = true;
         if (env.receiveFrames()) {
             FrameReceiver receiver = new FrameReceiver(this, imageChannel, new FrameDecoder(), screen.width(),
@@ -372,7 +374,8 @@ public final class ServerSession implements Tickable {
             case TIMEOUT -> tx.closeIf(ServerPhase.ACTIVE, frameTimeout());
             default -> { } // STALL_END: the gate opens by itself
         }
-        tx.after(() -> notifyObservers(revision, t));
+        for (ObserverSlot slot : observers) slot.queue.add(new Notification(revision, t)); // order = transaction order
+        tx.after(this::drainObservers);
     }
 
     /** True once ACTIVE, a first frame arrived, no stall is in progress and the session is open. */
@@ -409,6 +412,11 @@ public final class ServerSession implements Tickable {
         return lifecycle.atomically(tx -> Optional.ofNullable(latestFrame));
     }
 
+    /** The instant the session turned ACTIVE, from the session clock; empty before that. */
+    public java.util.OptionalLong activeAtNanos() {
+        return framesExpected ? java.util.OptionalLong.of(activeAtNanos) : java.util.OptionalLong.empty();
+    }
+
     public long framesReceived() {
         return lifecycle.atomically(tx -> framesReceived);
     }
@@ -424,31 +432,49 @@ public final class ServerSession implements Tickable {
         void onChange(long revision, FrameMonitor.Transition transition);
     }
 
+   private record Notification(long revision, FrameMonitor.Transition transition) {}
+
     private static final class ObserverSlot {
         final FrameObserver observer;
-        final AtomicLong lastRevision = new AtomicLong();
+        final java.util.Queue<Notification> queue = new java.util.concurrent.ConcurrentLinkedQueue<>();
+        final java.util.concurrent.atomic.AtomicBoolean draining = new java.util.concurrent.atomic.AtomicBoolean();
 
         ObserverSlot(FrameObserver observer) {
             this.observer = observer;
         }
     }
 
+    /** Observers registered later only see later transitions. */
     public void addFrameObserver(FrameObserver observer) {
         observers.add(new ObserverSlot(Objects.requireNonNull(observer)));
     }
 
     /**
-     * Delivers a transition outside the lock. Two threads may run their deliveries in the opposite
-     * order of their transactions, so an observer drops anything older than what it already saw.
+     * Delivers queued notifications outside the lock. Notifications are queued inside the
+     * transaction, so their order is the transaction order; a single drainer per observer
+     * delivers them one at a time, so a later transition can never overtake an earlier one even
+     * when the earlier delivery is slow.
      */
-    void notifyObservers(long revision, FrameMonitor.Transition t) {
-        for (ObserverSlot slot : observers) {
-            if (slot.lastRevision.getAndAccumulate(revision, Math::max) >= revision) continue;
+    private void drainObservers() {
+        for (ObserverSlot slot : observers) drain(slot);
+    }
+
+    private static void drain(ObserverSlot slot) {
+        while (true) {
+            if (!slot.draining.compareAndSet(false, true)) return; // the current drainer will see our entry
             try {
-                slot.observer.onChange(revision, t);
-            } catch (RuntimeException e) {
-                // an observer must not break the session
+                Notification n;
+                while ((n = slot.queue.poll()) != null) {
+                    try {
+                        slot.observer.onChange(n.revision(), n.transition());
+                    } catch (RuntimeException e) {
+                        // an observer must not break the session
+                    }
+                }
+            } finally {
+                slot.draining.set(false);
             }
+            if (slot.queue.isEmpty()) return; // else an entry arrived between the last poll and the release: go again
         }
     }
 }

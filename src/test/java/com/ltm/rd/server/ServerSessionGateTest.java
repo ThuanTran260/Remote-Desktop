@@ -255,20 +255,70 @@ class ServerSessionGateTest {
 
     // ---- observers -------------------------------------------------------------------------
 
-    @Test
-    void staleObserverNotificationIgnored() throws Exception {
+   @Test
+    void observerDeliveryFollowsTransactionOrderEvenWhileTheFirstDeliveryIsBlocked() throws Exception {
         ServerSession session = active();
+        CountDownLatch startReached = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        List<Long> revisions = new java.util.concurrent.CopyOnWriteArrayList<>();
         AtomicReference<Boolean> stalledView = new AtomicReference<>(false);
-        List<FrameMonitor.Transition> seen = new ArrayList<>();
         session.addFrameObserver((revision, t) -> {
-            seen.add(t);
+            if (t == FrameMonitor.Transition.STALL_START) {
+                startReached.countDown();
+                try {
+                    release.await(); // the first delivery is stuck inside the observer
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             stalledView.set(t == FrameMonitor.Transition.STALL_START);
+            revisions.add(revision);
         });
-        // deliveries of revision 2 and 1 swapped, as two threads running their after-actions could do
-        session.notifyObservers(2, FrameMonitor.Transition.STALL_END);
-        session.notifyObservers(1, FrameMonitor.Transition.STALL_START);
-        assertEquals(List.of(FrameMonitor.Transition.STALL_END), seen);
+        Future<?> start = pool.submit(() -> session.tick(s(3))); // transaction 1: STALL_START
+        assertTrue(startReached.await(WAIT_S, TimeUnit.SECONDS));
+        // transaction 2 commits while delivery 1 is still running: it must queue behind it, not overtake it
+        pool.submit(() -> session.publishFrame(1, image(), s(4))).get(WAIT_S, TimeUnit.SECONDS);
+        assertTrue(revisions.isEmpty(), "nothing was delivered while the first delivery is blocked");
+        release.countDown();
+        start.get(WAIT_S, TimeUnit.SECONDS);
+        assertEquals(List.of(1L, 2L), revisions, "delivery order equals transaction order");
         assertFalse(stalledView.get(), "the observer ends in 'not stalled'");
+    }
+
+    @Test
+    void observerDeliveryOrderSurvivesRacingTransactions() throws Exception {
+        CyclicBarrier barrier = new CyclicBarrier(2);
+        for (int i = 0; i < 100; i++) {
+            ServerSession session = active();
+            List<Long> revisions = new java.util.concurrent.CopyOnWriteArrayList<>();
+            AtomicReference<Boolean> stalledView = new AtomicReference<>(false);
+            session.addFrameObserver((revision, t) -> {
+                stalledView.set(t == FrameMonitor.Transition.STALL_START);
+                revisions.add(revision);
+            });
+            Future<?> tick = pool.submit(() -> {
+                barrier.await(WAIT_S, TimeUnit.SECONDS);
+                session.tick(s(3));
+                return null;
+            });
+            Future<?> frame = pool.submit(() -> {
+                barrier.await(WAIT_S, TimeUnit.SECONDS);
+                session.publishFrame(1, image(), s(4));
+                return null;
+            });
+            tick.get(WAIT_S, TimeUnit.SECONDS);
+            frame.get(WAIT_S, TimeUnit.SECONDS);
+            for (int r = 1; r < revisions.size(); r++) {
+                assertTrue(revisions.get(r) > revisions.get(r - 1), "iteration " + i + ": " + revisions);
+            }
+            assertFalse(stalledView.get(), "iteration " + i + " ends in 'not stalled': " + revisions);
+            closeAndAwait(session);
+        }
+    }
+
+    private void closeAndAwait(ServerSession session) throws Exception {
+        session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "done", false));
+        session.lifecycle().terminated().get(WAIT_S, TimeUnit.SECONDS);
     }
 
     @Test
@@ -324,6 +374,7 @@ class ServerSessionGateTest {
             boolean counted = session.framesReceived() == 1;
             boolean closed = session.lifecycle().isClosed();
             assertTrue(counted ^ closed, "iteration " + i + ": counted=" + counted + " closed=" + closed);
+            closeAndAwait(session); // stop this iteration's writer thread now, not only at the end of the test
         }
     }
 }

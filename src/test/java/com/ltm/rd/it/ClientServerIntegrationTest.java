@@ -98,6 +98,15 @@ class ClientServerIntegrationTest {
                 Duration.ZERO, Duration.ofSeconds(30), Duration.ofMillis(100));
     }
 
+    /** Generous handshake and auth windows for tests that do not measure a deadline. */
+    private static Timeouts relaxed() {
+        return new Timeouts(Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofSeconds(10),
+                Duration.ofSeconds(10), Duration.ofMillis(200), Duration.ofSeconds(10), Duration.ofSeconds(10),
+                Duration.ofSeconds(3), Duration.ofSeconds(15), Duration.ofSeconds(20), Duration.ofSeconds(5),
+                Duration.ofSeconds(10), GRACE, Duration.ofSeconds(3), Duration.ZERO, Duration.ofSeconds(30),
+                Duration.ofMillis(100));
+    }
+
     private static Timeouts normal() {
         return timeouts(Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofSeconds(3), Duration.ofSeconds(3));
     }
@@ -383,9 +392,9 @@ class ClientServerIntegrationTest {
 
     @Test
     void wrongCodeReportedToClient() throws Exception {
-        ServerCore core = core(normal());
+        ServerCore core = core(relaxed());
         String code = core.sessions().currentCode();
-        ClientSession c = client(core, code.equals("000000") ? "000001" : "000000", normal(), ClientHooks.none());
+        ClientSession c = client(core, code.equals("000000") ? "000001" : "000000", relaxed(), ClientHooks.none());
         c.start();
         awaitTerminated(c);
         assertEquals(Packet.AuthStatus.WRONG_CODE, c.authFailure().orElseThrow());

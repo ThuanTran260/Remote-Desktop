@@ -284,7 +284,7 @@ public final class InputExecutor {
                     if (!wasHeld) {
                         heldKeys.remove(k.code());
                     }
-                    warnUnsupportedKey(k.code(), e);
+                    warnUnsupportedKey();
                 }
             }
             case InputCommand.KeyRelease k -> {
@@ -336,12 +336,13 @@ public final class InputExecutor {
         return x >= 0 && y >= 0 && x < b.width && y < b.height;
     }
 
-    private void warnUnsupportedKey(int code, IllegalArgumentException e) {
+    /** Never logs the key code or the device message: keys are not to appear in logs. */
+    private void warnUnsupportedKey() {
         long now = System.nanoTime();
         if (!warned || now - lastWarnNanos >= WARN_INTERVAL_NANOS) {
             warned = true;
             lastWarnNanos = now;
-            LOG.log(System.Logger.Level.WARNING, "Unsupported key code " + code + ", skipped", e);
+            LOG.log(System.Logger.Level.WARNING, "Unsupported key skipped");
         }
     }
 }

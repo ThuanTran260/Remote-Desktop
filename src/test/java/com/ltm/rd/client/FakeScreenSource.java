@@ -18,6 +18,7 @@ public final class FakeScreenSource implements ScreenSource {
     private volatile CountDownLatch gate;
     private final AtomicReference<Runnable> nextCaptureHook = new AtomicReference<>();
     private final AtomicInteger captures = new AtomicInteger();
+    private volatile boolean failing;
 
     public FakeScreenSource(int width, int height) {
         this.geometry = new ScreenGeometry(new Rectangle(0, 0, width, height), 1.0, 1.0);
@@ -51,6 +52,11 @@ public final class FakeScreenSource implements ScreenSource {
         nextCaptureHook.set(hook);
     }
 
+    /** Makes every capture throw IOException, like a lost display. */
+    public void failCaptures(boolean fail) {
+        failing = fail;
+    }
+
     public int captureCount() {
         return captures.get();
     }
@@ -60,6 +66,7 @@ public final class FakeScreenSource implements ScreenSource {
         Runnable hook = nextCaptureHook.getAndSet(null);
         if (hook != null) hook.run();
         captures.incrementAndGet();
+        if (failing) throw new java.io.IOException("capture failed");
         CountDownLatch g = gate;
         if (g != null) {
             try {

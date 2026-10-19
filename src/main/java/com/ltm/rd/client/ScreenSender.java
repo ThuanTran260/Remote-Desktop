@@ -7,6 +7,7 @@ import com.ltm.rd.common.PacketIO;
 import com.ltm.rd.common.SessionLifecycle;
 import com.ltm.rd.common.WriteTracker;
 import java.awt.image.BufferedImage;
+import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
@@ -66,9 +67,16 @@ public final class ScreenSender {
                         return;
                     }
                 }
-                BufferedImage image = screen.capture(initial.bounds());
-                FrameEncoder.EncodedFrame frame = encoder.encode(image);
-                Packet packet = Packet.frame(frame.width(), frame.height(), frame.jpeg());
+                Packet packet;
+                try {
+                    BufferedImage image = screen.capture(initial.bounds());
+                    FrameEncoder.EncodedFrame frame = encoder.encode(image);
+                    packet = Packet.frame(frame.width(), frame.height(), frame.jpeg());
+                } catch (IOException | RuntimeException e) {
+                    // the command channel still works: tell the Server the real reason
+                    lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "capture failed", true));
+                    return;
+                }
                 long op = tracker.begin(clock.getAsLong());
                 if (op == WriteTracker.EXPIRED_OP) return; // the watchdog declared a write stuck: send nothing more
                 boolean intact;
@@ -79,7 +87,7 @@ public final class ScreenSender {
                     intact = tracker.end(op);
                 }
                 if (!intact) return;
-                sleepRest(lifecycle, cycleStart);
+                if (!sleepRest(lifecycle, cycleStart)) return;
             }
         } catch (Throwable e) { // incl. interruption of a blocked write: the session decides what that means
             if (!lifecycle.isClosed()) {
@@ -88,14 +96,24 @@ public final class ScreenSender {
         }
     }
 
-    /** Sleeps out the rest of the cycle in short slices, leaving early once the session is closed. */
-    private void sleepRest(SessionLifecycle<ClientPhase> lifecycle, long cycleStart) {
+    /**
+     * Sleeps out the rest of the cycle in short slices. Returns false when the sender must stop: the
+     * session closed, or the thread was interrupted. The close procedure interrupts workers, so an
+     * interrupt on an open session is unexpected; the session is then closed rather than spun on.
+     */
+    private boolean sleepRest(SessionLifecycle<ClientPhase> lifecycle, long cycleStart) {
         long deadline = cycleStart + periodNanos;
         while (!lifecycle.isClosed()) {
             long left = deadline - clock.getAsLong();
-            if (left <= 0) return;
+            if (left <= 0) return true;
             LockSupport.parkNanos(Math.min(left, SLEEP_SLICE_NANOS));
-            if (Thread.currentThread().isInterrupted()) return; // the close procedure interrupts workers
+            if (Thread.currentThread().isInterrupted()) {
+                if (!lifecycle.isClosed()) {
+                    lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "screen sender interrupted", true));
+                }
+                return false;
+            }
         }
+        return false;
     }
 }
