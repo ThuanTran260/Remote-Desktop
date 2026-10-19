@@ -23,7 +23,7 @@ class CommandWriterTest {
     }
 
     /** Controllable sink: records bytes, optionally blocks in write or flush, or fails. */
-    private static final class FakeSink extends OutputStream {
+    private static class FakeSink extends OutputStream {
         final ByteArrayOutputStream data = new ByteArrayOutputStream();
         final CountDownLatch writeEntered = new CountDownLatch(1);
         final CountDownLatch flushEntered = new CountDownLatch(1);
@@ -364,6 +364,26 @@ class CommandWriterTest {
         assertFalse(created.get(0).isAlive());
         assertEquals(1, threads.get());
         assertEquals(CommandWriter.OfferResult.CLOSED, w.offer(Packet.ping(1)));
+    }
+
+    @Test
+    void defaultFactoryCreatesNamedDaemonThread() throws Exception {
+        AtomicReference<Thread> writerThread = new AtomicReference<>();
+        FakeSink sink = new FakeSink() {
+            @Override
+            public void write(byte[] b, int off, int len) throws IOException {
+                writerThread.compareAndSet(null, Thread.currentThread());
+                super.write(b, off, len);
+            }
+        };
+        sink.flushCounter = new CountDownLatch(1);
+        CommandWriter w = new CommandWriter(new DataOutputStream(sink), t -> {});
+        writers.add(w);
+        w.start();
+        w.offer(Packet.ping(1));
+        assertTrue(sink.flushCounter.await(WAIT_S, TimeUnit.SECONDS));
+        assertTrue(writerThread.get().isDaemon());
+        assertTrue(writerThread.get().getName().startsWith("rd-cmd-writer-"), writerThread.get().getName());
     }
 
     @Test

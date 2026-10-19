@@ -58,7 +58,7 @@ public final class CommandWriter {
     }
 
     private static Thread newDaemonThread(Runnable r) {
-        Thread t = new Thread(r, "command-writer-" + THREAD_SEQ.incrementAndGet());
+        Thread t = new Thread(r, "rd-cmd-writer-" + THREAD_SEQ.incrementAndGet());
         t.setDaemon(true);
         return t;
     }
