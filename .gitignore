@@ -1,5 +1,20 @@
+# Build output
 target/
+*.class
+
+# IDE
 .idea/
 *.iml
 .vscode/
-*.class
+.settings/
+.project
+.classpath
+nbproject/private/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs and JVM crash dumps
+*.log
+hs_err_pid*
