@@ -40,6 +40,8 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class ClientSession implements Tickable {
     private static final int IMAGE_SEND_BUFFER = 64 * 1024;
+    private static final int FPS = 12;
+    private static final float FRAME_QUALITY = 0.6f;
 
     /** What the Server may send to the Client on the command channel. */
     private static final Set<PacketType> COMMAND_IN = EnumSet.of(PacketType.SESSION_ACTIVE, PacketType.PING,
@@ -72,6 +74,7 @@ public final class ClientSession implements Tickable {
     private CommandWriter writer;
     private CommandReceiver receiver;
     private Channel imageChannel;
+    private volatile ScreenGeometry announced; // the geometry SCREEN_INFO was derived from
 
     private volatile Heartbeat heartbeat;
     private volatile Long authDeadlineNanos; // set when AUTHENTICATING begins
@@ -247,7 +250,9 @@ public final class ClientSession implements Tickable {
             return;
         }
 
-        Rectangle bounds = screen.geometry().bounds(); // read before the transaction: no work under the lock
+        ScreenGeometry geometry = screen.geometry(); // read before the transaction: no work under the lock
+        announced = geometry;
+        Rectangle bounds = geometry.bounds();
         if (!attachCommandChannel(cmdChannel, bounds)) return;
 
         Socket img = lifecycle.register(new Socket());
@@ -391,7 +396,23 @@ public final class ClientSession implements Tickable {
     /** Hook point for the screen sender; the sender itself arrives with the image stream. */
     private void startSender() {
         hooks.beforeSenderStart().run(); // lets a test cancel between "input began" and "sender started"
-        lifecycle.startWorker("rd-screen-sender", senderRuns::incrementAndGet);
+        Channel img = lifecycle.atomically(tx -> imageChannel);
+        ScreenSender sender = new ScreenSender(this, img, screen,
+                new FrameEncoder(Protocol.MAX_FRAME_WIDTH, FRAME_QUALITY), FPS, cfg.nanoClock());
+        WriteWatchdog dog = new WriteWatchdog(sender.tracker(), timeouts.imgWriteLimit(),
+                () -> lifecycle.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "image write stuck", true)));
+        Ticker.Registration registration = ticker.register(dog);
+        lifecycle.addStopHook(registration::close); // closed at once if the session is already closed
+        Runnable body = sender.body();
+        lifecycle.startWorker("rd-screen-sender", () -> {
+            senderRuns.incrementAndGet();
+            body.run();
+        });
+    }
+
+    /** Geometry announced in SCREEN_INFO; the sender compares against it. */
+    ScreenGeometry announcedGeometry() {
+        return announced;
     }
 
     /** Close hook: release input for this generation, if it began, and publish the result. */

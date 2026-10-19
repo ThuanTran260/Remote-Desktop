@@ -14,6 +14,7 @@ import com.ltm.rd.common.Tickable;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.common.WriteWatchdog;
+import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.SocketException;
@@ -23,6 +24,8 @@ import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
@@ -36,7 +39,12 @@ public final class ServerSession implements Tickable {
 
     /** Collaborators a session needs besides its identity; {@code ticker} may be null in unit tests. */
     record Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
-            Runnable afterTokenCheck) {
+            Runnable afterTokenCheck, boolean receiveFrames) {
+        Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
+                Runnable afterTokenCheck) {
+            this(timeouts, clock, ticker, shuttingDown, afterTokenCheck, true);
+        }
+
         Env {
             Objects.requireNonNull(timeouts);
             Objects.requireNonNull(clock);
@@ -65,7 +73,14 @@ public final class ServerSession implements Tickable {
     private Packet.SizePayload screen;
     private Channel imageChannel;
 
+    private FrameMonitor monitor; // set when the session turns ACTIVE
+    private BufferedImage latestFrame;
+    private long framesReceived;
+    private long releaseAllSent;
+
+    private volatile boolean framesExpected; // cheap pre-check for the ticker; true once ACTIVE
     private volatile Heartbeat heartbeat;
+    private final CopyOnWriteArrayList<ObserverSlot> observers = new CopyOnWriteArrayList<>();
 
     ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
             SessionLifecycle<ServerPhase> lifecycle) {
@@ -117,7 +132,15 @@ public final class ServerSession implements Tickable {
     /** Closes the session if it is still RESERVED when the reserve window has passed. */
     @Override
     public void tick(long nowNanos) {
-        if (reserveExpired(nowNanos)) {
+        if (framesExpected) {
+            // the monitor decision and its consequence (gate, RELEASE_ALL, timeout) are one transaction
+            lifecycle.atomically(tx -> {
+                if (!tx.isClosed() && tx.phase() == ServerPhase.ACTIVE && monitor != null) {
+                    handleTransition(tx, monitor.onTick(nowNanos));
+                }
+                return null;
+            });
+        } else if (reserveExpired(nowNanos)) {
             lifecycle.closeIf(ServerPhase.RESERVED, new CloseInfo(Packet.DisconnectReason.TIMEOUT, "attach timeout", true));
         }
     }
@@ -286,9 +309,146 @@ public final class ServerSession implements Tickable {
         if (writer == null || screen == null || imageChannel == null) return;
         if (tx.isClosed() || tx.phase() != ServerPhase.RESERVED || reserveExpired(now)) return;
         switch (writer.offer(Packet.sessionActive())) {
-            case ACCEPTED -> tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE);
+            case ACCEPTED -> {
+                if (tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE)) onActive(tx, now);
+            }
             case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
             default -> { } // CLOSED or COALESCED: the session is already going away
+        }
+    }
+
+    // ---- frames and the control gate ---------------------------------------------------------
+
+    /** Inside the activation transaction: start the frame monitor and, after unlock, the receiver. */
+    private void onActive(SessionLifecycle.Tx<ServerPhase> tx, long now) {
+        monitor = new FrameMonitor(now, env.timeouts().frameStall(), env.timeouts().frameTimeout());
+        framesExpected = true;
+        if (env.receiveFrames()) {
+            FrameReceiver receiver = new FrameReceiver(this, imageChannel, new FrameDecoder(), screen.width(),
+                    screen.height(), env.clock());
+            tx.after(() -> lifecycle.startWorker("rd-frame-receiver", receiver));
+        }
+    }
+
+    /**
+     * A decoded frame from the receiver. A frame of another generation, for a closed session, or
+     * after the frame timeout was decided is dropped; the monitor decision and its consequence
+     * share one transaction with the tick, so exactly one of frame and timeout wins.
+     */
+    void publishFrame(long frameGeneration, BufferedImage image, long now) {
+        lifecycle.atomically(tx -> {
+            if (frameGeneration != generation || tx.isClosed() || tx.phase() != ServerPhase.ACTIVE || monitor == null) {
+                return null;
+            }
+            FrameMonitor.Transition t = monitor.onFrame(now);
+            if (t == FrameMonitor.Transition.TIMEOUT) {
+                tx.closeIf(ServerPhase.ACTIVE, frameTimeout()); // dropped: the session is closing
+                return null;
+            }
+            latestFrame = image;
+            framesReceived++;
+            handleTransition(tx, t);
+            return null;
+        });
+    }
+
+    private static CloseInfo frameTimeout() {
+        return new CloseInfo(Packet.DisconnectReason.TIMEOUT, "frame timeout", true);
+    }
+
+    /** Inside the transaction that produced {@code t}: no input can slip in between gate and RELEASE_ALL. */
+    private void handleTransition(SessionLifecycle.Tx<ServerPhase> tx, FrameMonitor.Transition t) {
+        if (t == FrameMonitor.Transition.NONE) return;
+        long revision = monitor.revision();
+        switch (t) {
+            case STALL_START -> { // the gate is now closed (monitor.stalled()); release whatever the Client holds
+                switch (writer.offer(Packet.releaseAll())) {
+                    case ACCEPTED -> releaseAllSent++;
+                    case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW,
+                            "command queue overflow", true));
+                    default -> { }
+                }
+            }
+            case TIMEOUT -> tx.closeIf(ServerPhase.ACTIVE, frameTimeout());
+            default -> { } // STALL_END: the gate opens by itself
+        }
+        tx.after(() -> notifyObservers(revision, t));
+    }
+
+    /** True once ACTIVE, a first frame arrived, no stall is in progress and the session is open. */
+    public boolean controlEnabled() {
+        return lifecycle.atomically(tx -> gateOpen(tx));
+    }
+
+    private boolean gateOpen(SessionLifecycle.Tx<ServerPhase> tx) {
+        return !tx.isClosed() && tx.phase() == ServerPhase.ACTIVE && monitor != null && monitor.hasFrame()
+                && !monitor.stalled();
+    }
+
+    /**
+     * Queues an input packet for the Client. The gate check and the offer are one transaction, so
+     * an input can never be queued after the stall decision that closed the gate; with the gate
+     * closed the result is CLOSED.
+     */
+    public CommandWriter.OfferResult offerInput(Packet p) {
+        switch (p.type()) {
+            case MOUSE_MOVE, MOUSE_PRESS, MOUSE_RELEASE, WHEEL, KEY_PRESS, KEY_RELEASE -> { }
+            default -> throw new IllegalArgumentException("not an input packet: " + p.type());
+        }
+        return lifecycle.atomically(tx -> {
+            if (!gateOpen(tx) || writer == null) return CommandWriter.OfferResult.CLOSED;
+            CommandWriter.OfferResult result = writer.offer(p);
+            if (result == CommandWriter.OfferResult.OVERFLOW) {
+                tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
+            }
+            return result;
+        });
+    }
+
+    public Optional<BufferedImage> latestFrame() {
+        return lifecycle.atomically(tx -> Optional.ofNullable(latestFrame));
+    }
+
+    public long framesReceived() {
+        return lifecycle.atomically(tx -> framesReceived);
+    }
+
+    /** RELEASE_ALL packets the command writer accepted because of a stall. */
+    public long releaseAllSent() {
+        return lifecycle.atomically(tx -> releaseAllSent);
+    }
+
+    /** For UI and tests; called outside the session lock. */
+    @FunctionalInterface
+    public interface FrameObserver {
+        void onChange(long revision, FrameMonitor.Transition transition);
+    }
+
+    private static final class ObserverSlot {
+        final FrameObserver observer;
+        final AtomicLong lastRevision = new AtomicLong();
+
+        ObserverSlot(FrameObserver observer) {
+            this.observer = observer;
+        }
+    }
+
+    public void addFrameObserver(FrameObserver observer) {
+        observers.add(new ObserverSlot(Objects.requireNonNull(observer)));
+    }
+
+    /**
+     * Delivers a transition outside the lock. Two threads may run their deliveries in the opposite
+     * order of their transactions, so an observer drops anything older than what it already saw.
+     */
+    void notifyObservers(long revision, FrameMonitor.Transition t) {
+        for (ObserverSlot slot : observers) {
+            if (slot.lastRevision.getAndAccumulate(revision, Math::max) >= revision) continue;
+            try {
+                slot.observer.onChange(revision, t);
+            } catch (RuntimeException e) {
+                // an observer must not break the session
+            }
         }
     }
 }

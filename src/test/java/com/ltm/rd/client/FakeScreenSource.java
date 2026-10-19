@@ -2,10 +2,22 @@ package com.ltm.rd.client;
 
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
-/** Fixed-geometry screen source producing blank images; no AWT Robot involved. */
+/**
+ * Screen source producing blank images, no AWT Robot involved. Tests can change the reported
+ * geometry, the size of the captured image, block captures, and run a hook at the next capture
+ * (to know which frame is about to be sent).
+ */
 public final class FakeScreenSource implements ScreenSource {
-    private final ScreenGeometry geometry;
+    private volatile ScreenGeometry geometry;
+    private volatile int captureWidth;
+    private volatile int captureHeight;
+    private volatile CountDownLatch gate;
+    private final AtomicReference<Runnable> nextCaptureHook = new AtomicReference<>();
+    private final AtomicInteger captures = new AtomicInteger();
 
     public FakeScreenSource(int width, int height) {
         this.geometry = new ScreenGeometry(new Rectangle(0, 0, width, height), 1.0, 1.0);
@@ -16,8 +28,49 @@ public final class FakeScreenSource implements ScreenSource {
         return geometry;
     }
 
+    /** Changes the reported screen geometry, as a resolution change would. */
+    public void setGeometry(int width, int height) {
+        geometry = new ScreenGeometry(new Rectangle(0, 0, width, height), 1.0, 1.0);
+    }
+
+    /** Captured images get this size regardless of the requested bounds (0 = follow the bounds). */
+    public void setCaptureSize(int width, int height) {
+        captureWidth = width;
+        captureHeight = height;
+    }
+
+    /** Blocks every capture until the returned latch is counted down. */
+    public CountDownLatch blockCaptures() {
+        CountDownLatch latch = new CountDownLatch(1);
+        gate = latch;
+        return latch;
+    }
+
+    /** Runs {@code hook} once, at the start of the next capture. */
+    public void onNextCapture(Runnable hook) {
+        nextCaptureHook.set(hook);
+    }
+
+    public int captureCount() {
+        return captures.get();
+    }
+
     @Override
-    public BufferedImage capture(Rectangle bounds) {
-        return new BufferedImage(Math.max(1, bounds.width), Math.max(1, bounds.height), BufferedImage.TYPE_INT_RGB);
+    public BufferedImage capture(Rectangle bounds) throws java.io.IOException {
+        Runnable hook = nextCaptureHook.getAndSet(null);
+        if (hook != null) hook.run();
+        captures.incrementAndGet();
+        CountDownLatch g = gate;
+        if (g != null) {
+            try {
+                g.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new java.io.InterruptedIOException("capture interrupted");
+            }
+        }
+        int w = captureWidth > 0 ? captureWidth : bounds.width;
+        int h = captureHeight > 0 ? captureHeight : bounds.height;
+        return new BufferedImage(Math.max(1, w), Math.max(1, h), BufferedImage.TYPE_INT_RGB);
     }
 }
