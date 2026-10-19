@@ -16,6 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
@@ -82,7 +83,8 @@ public final class SessionLifecycle<P extends Enum<P>> {
     private int workerCount; // guarded by lock; STARTING + running
     private final Set<Thread> runningWorkers = new HashSet<>(); // guarded by lock
 
-    private final CompletableFuture<CloseInfo> socketsClosed = new CompletableFuture<>();
+    private final AtomicBoolean finished = new AtomicBoolean(); // set once phase B work has started
+    private final CompletableFuture<CloseInfo> socketsClosed =new CompletableFuture<>();
     private final CompletableFuture<CloseInfo> terminated = new CompletableFuture<>();
 
     public SessionLifecycle(P initial, P closing, LongSupplier nanoClock, Duration closeGrace,
@@ -219,7 +221,8 @@ public final class SessionLifecycle<P extends Enum<P>> {
         phase = closingPhase;
         long startedAt = nanoClock.getAsLong();
         closeStartedAt = startedAt;
-        deferred.add(() -> runCloseProcedure(info, startedAt));
+        // First in line: a slow earlier action of this transaction must not delay the forced deadline.
+        deferred.add(0, () -> runCloseProcedure(info, startedAt));
         return true;
     }
 
@@ -289,8 +292,14 @@ public final class SessionLifecycle<P extends Enum<P>> {
      * the body is skipped.
      */
     public boolean startWorker(String name, Runnable body) {
+        return startWorker(name, body, () -> {});
+    }
+
+    /** As {@link #startWorker(String, Runnable)}; {@code onSkipped} runs outside the lock if the body is skipped. */
+    public boolean startWorker(String name, Runnable body, Runnable onSkipped) {
         Objects.requireNonNull(name);
         Objects.requireNonNull(body);
+        Objects.requireNonNull(onSkipped);
         if (lock.isHeldByCurrentThread()) {
             throw new IllegalStateException("startWorker must not be called while holding the session lock");
         }
@@ -302,7 +311,7 @@ public final class SessionLifecycle<P extends Enum<P>> {
             lock.unlock();
         }
         try {
-            Thread t = threadFactory.newThread(() -> runWorker(body));
+            Thread t = threadFactory.newThread(() -> runWorker(body, onSkipped));
             t.setName(name);
             t.setDaemon(true);
             t.start();
@@ -315,7 +324,7 @@ public final class SessionLifecycle<P extends Enum<P>> {
         return true;
     }
 
-    private void runWorker(Runnable body) {
+    private void runWorker(Runnable body, Runnable onSkipped) {
         Thread me = Thread.currentThread();
         boolean run;
         lock.lock();
@@ -327,6 +336,7 @@ public final class SessionLifecycle<P extends Enum<P>> {
         }
         try {
             if (run) body.run();
+            else runQuietly(onSkipped); // closed before the thread ran: tell the owner, outside the lock
         } catch (Throwable e) {
             LOG.log(System.Logger.Level.WARNING, "worker failed", e);
             close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "worker failed", true));
@@ -363,7 +373,7 @@ public final class SessionLifecycle<P extends Enum<P>> {
         ScheduledFuture<?> forced = null;
         try {
             long delay = Math.max(0, deadline - nanoClock.getAsLong());
-            forced = scheduler.schedule(() -> forceCloseSockets(info), delay, TimeUnit.NANOSECONDS);
+            forced = scheduler.schedule(() -> onDeadline(info), delay, TimeUnit.NANOSECONDS);
         } catch (Throwable e) { // rejected: nothing else guarantees the deadline, close right away
             forceCloseSockets(info);
         }
@@ -372,7 +382,8 @@ public final class SessionLifecycle<P extends Enum<P>> {
         CompletableFuture<?> step;
         try {
             Function<CloseInfo, CompletableFuture<?>> fn = locked(() -> gracefulStep);
-            CompletableFuture<?> f = fn == null ? null : fn.apply(info);
+            // a blocking hook may have outlived the deadline: the close is already finished then
+            CompletableFuture<?> f = fn == null || finished.get() ? null : fn.apply(info);
             step = f != null ? f : CompletableFuture.completedFuture(null);
         } catch (Throwable e) {
             LOG.log(System.Logger.Level.WARNING, "graceful close step failed", e);
@@ -401,8 +412,24 @@ public final class SessionLifecycle<P extends Enum<P>> {
         }
     }
 
+    /**
+     * Forced deadline: closes the raw sockets on the scheduler thread (cheap, must be punctual),
+     * then finishes the rest on {@code cleanup} so a blocking stop hook cannot stall the scheduler.
+     * This is what guarantees termination even if phase A or phase B never gets to run.
+     */
+    private void onDeadline(CloseInfo info) {
+        forceCloseSockets(info);
+        try {
+            cleanup.execute(() -> finishClose(info, null));
+        } catch (Throwable e) {
+            finishClose(info, null);
+        }
+    }
+
+    /** Idempotent: the forced deadline and phase B race to finish, exactly one wins. */
     private void finishClose(CloseInfo info, ScheduledFuture<?> forced) {
         if (forced != null) forced.cancel(false);
+        if (!finished.compareAndSet(false, true)) return;
         try {
             forceCloseSockets(info);
             List<Thread> toInterrupt = locked(() -> new ArrayList<>(runningWorkers));
@@ -452,7 +479,7 @@ public final class SessionLifecycle<P extends Enum<P>> {
     private static void closeQuietly(Socket s) {
         try {
             s.close();
-        } catch (IOException e) {
+        } catch (Throwable e) { // incl. RuntimeException: one bad socket must not skip the rest
             LOG.log(System.Logger.Level.DEBUG, "socket close failed", e);
         }
     }

@@ -91,7 +91,7 @@ public final class CommandWriter {
         }
         boolean accepted;
         try {
-            accepted = starter.start("rd-cmd-writer-" + nextThreadName(), this::run);
+            accepted = starter.start("rd-cmd-writer-" + nextThreadName(), this::run, () -> stopInternal(false));
         } catch (Throwable e) {
             stopInternal(false);
             throw e;
@@ -195,21 +195,27 @@ public final class CommandWriter {
         while (true) {
             Packet next;
             CompletableFuture<Void> finish = null;
+            boolean interrupted = false;
             synchronized (lock) {
                 if (thread == null) thread = Thread.currentThread();
                 try {
                     while (!stopped && !closing && queue.isEmpty()) lock.wait();
                 } catch (InterruptedException e) {
-                    return;
+                    interrupted = true;
                 }
-                if (stopped || failure != null) return;
-                if (closing) {
+                if (interrupted || stopped || failure != null) {
+                    next = null;
+                } else if (closing) {
                     next = finalPacket;
                     finalPacket = null;
                     if (next == null) finish = done;
                 } else {
                     next = queue.pollFirst(); // from here on the packet is in flight
                 }
+            }
+            if (interrupted) { // stop outside the lock: it completes the pending close future
+                stopInternal(false);
+                return;
             }
             if (next == null) {
                 if (finish != null) finish.complete(null);

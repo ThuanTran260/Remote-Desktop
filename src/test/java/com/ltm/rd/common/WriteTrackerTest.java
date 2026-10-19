@@ -146,17 +146,25 @@ class WriteTrackerTest {
     @Test
     void writerStopsAfterExpire() throws Exception {
         GatedSink sink = new GatedSink();
-        CommandWriter w = new CommandWriter(new DataOutputStream(sink), 256, Thread::new, t -> {}, System::nanoTime);
+        java.util.concurrent.atomic.AtomicReference<Thread> writerThread =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        CommandWriter w = new CommandWriter(new DataOutputStream(sink), 256, r -> {
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            writerThread.set(t);
+            return t;
+        }, t -> {}, System::nanoTime);
         try {
             w.start();
             w.offer(Packet.ping(1));
             assertTrue(sink.entered.await(WAIT_S, TimeUnit.SECONDS));
             w.offer(Packet.ping(2));
+            assertEquals(List.of(Packet.ping(2)), w.queuedSnapshot(), "ping(2) is queued behind the stuck write");
             assertTrue(w.tracker().tryExpire(Long.MAX_VALUE / 2, Duration.ZERO));
-            CompletableFuture<Void> done = w.closeGracefully(Packet.disconnect(Packet.DisconnectReason.USER, "x"));
             sink.gate.countDown();
-            assertThrows(ExecutionException.class, () -> done.get(WAIT_S, TimeUnit.SECONDS));
-            assertEquals(List.of(Packet.ping(1)), sink.packets(), "nothing may be written after expiry");
+            writerThread.get().join(WAIT_S * 1000L);
+            assertFalse(writerThread.get().isAlive(), "writer must stop after its write expired");
+            assertEquals(List.of(Packet.ping(1)), sink.packets(), "queued ping(2) must never reach the sink");
             assertEquals(CommandWriter.OfferResult.CLOSED, w.offer(Packet.ping(3)));
         } finally {
             w.stop();
@@ -169,14 +177,14 @@ class WriteTrackerTest {
         CommandWriter w = new CommandWriter(new DataOutputStream(new ByteArrayOutputStream()), 256, r -> {
             throw new AssertionError("no thread may be created");
         }, t -> {}, System::nanoTime);
-        assertFalse(w.start((name, body) -> {
+        assertFalse(w.start((name, body, skipped) -> {
             asked.incrementAndGet();
             assertTrue(name.startsWith("rd-cmd-writer-"), name);
             return false;
         }));
         assertEquals(1, asked.get());
         assertEquals(CommandWriter.OfferResult.CLOSED, w.offer(Packet.ping(1)));
-        assertFalse(w.start((name, body) -> true), "refused writer cannot be restarted");
+        assertFalse(w.start((name, body, skipped) -> true), "refused writer cannot be restarted");
     }
 
     @Test
@@ -193,7 +201,7 @@ class WriteTrackerTest {
         };
         CommandWriter w = new CommandWriter(new DataOutputStream(sink), t -> {});
         AtomicInteger starts = new AtomicInteger();
-        WorkerStarter starter = (name, body) -> {
+        WorkerStarter starter = (name, body, skipped) -> {
             starts.incrementAndGet();
             Thread t = new Thread(body, name);
             t.setDaemon(true);

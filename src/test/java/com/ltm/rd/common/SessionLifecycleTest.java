@@ -78,6 +78,15 @@ class SessionLifecycleTest {
         return lc.atomically(body);
     }
 
+    /** Polls (bounded) until {@code t} reaches {@code state}; proves a thread is blocked, not just started. */
+    private static void awaitState(Thread t, Thread.State state) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_S);
+        while (t.getState() != state) {
+            assertTrue(System.nanoTime() < deadline, "thread never reached " + state + ", is " + t.getState());
+            java.util.concurrent.locks.LockSupport.parkNanos(1_000_000);
+        }
+    }
+
     private static void await(CountDownLatch l) throws InterruptedException {
         assertTrue(l.await(WAIT_S, TimeUnit.SECONDS), "latch timed out");
     }
@@ -110,17 +119,21 @@ class SessionLifecycleTest {
     }
 
     @Test
-    void closeIfAfterAdvanceLosesAndAdvanceAfterCloseIfLoses() {
-        SessionLifecycle<Phase> a = lc();
-        assertTrue(txBool(a, tx -> tx.advance(Phase.RESERVED, Phase.ACTIVE)));
-        assertFalse(a.closeIf(Phase.RESERVED, info("late")));
-        assertEquals(Phase.ACTIVE, a.phase());
-        assertFalse(a.isClosed());
+    void advanceBeforeCloseIfKeepsSessionOpen() {
+        SessionLifecycle<Phase> lc = lc();
+        assertTrue(txBool(lc, tx -> tx.advance(Phase.RESERVED, Phase.ACTIVE)));
+        assertFalse(lc.closeIf(Phase.RESERVED, info("late")));
+        assertEquals(Phase.ACTIVE, lc.phase());
+        assertFalse(lc.isClosed());
+    }
 
-        SessionLifecycle<Phase> b = lc();
-        assertTrue(b.closeIf(Phase.RESERVED, info("early")));
-        assertFalse(txBool(b, tx -> tx.advance(Phase.RESERVED, Phase.ACTIVE)));
-        assertEquals(Phase.CLOSING, b.phase());
+    @Test
+    void closeIfBeforeAdvanceBlocksAdvance() {
+        SessionLifecycle<Phase> lc = lc();
+        assertTrue(lc.closeIf(Phase.RESERVED, info("early")));
+        assertFalse(txBool(lc, tx -> tx.advance(Phase.RESERVED, Phase.ACTIVE)));
+        assertEquals(Phase.CLOSING, lc.phase());
+        assertTrue(lc.isClosed());
     }
 
     @Test
@@ -251,7 +264,9 @@ class SessionLifecycleTest {
         Socket s = unconnected();
         lc.register(s);
         AtomicInteger laterHooks = new AtomicInteger();
+        AtomicInteger throwingInvoked = new AtomicInteger();
         lc.addCloseHook(() -> {
+            throwingInvoked.incrementAndGet();
             throw new IllegalStateException("hook boom");
         });
         lc.addCloseHook(laterHooks::incrementAndGet);
@@ -263,7 +278,135 @@ class SessionLifecycleTest {
         assertTrue(elapsedMs >= 200, "never close before the deadline: " + elapsedMs);
         assertTrue(elapsedMs <= 800, "closed within deadline + slack: " + elapsedMs);
         assertTrue(s.isClosed());
+        assertEquals(1, throwingInvoked.get(), "the throwing hook must really have run");
         assertEquals(1, laterHooks.get(), "a throwing hook must not skip later hooks");
+    }
+
+    @Test
+    void throwingSocketCloseDoesNotSkipLaterSocketsOrStopHooks() throws Exception {
+        SessionLifecycle<Phase> lc = lc();
+        Socket exploding = new Socket() {
+            @Override
+            public synchronized void close() {
+                throw new IllegalStateException("close boom");
+            }
+        };
+        Socket good = unconnected();
+        lc.register(exploding);
+        lc.register(good);
+        CountDownLatch stopRan = new CountDownLatch(1);
+        lc.addStopHook(stopRan::countDown);
+        assertDoesNotThrow(() -> lc.close(info("x")));
+        lc.terminated().get(WAIT_S, TimeUnit.SECONDS);
+        assertTrue(good.isClosed(), "a failing close must not leave later sockets open");
+        assertEquals(0, stopRan.getCount(), "stop hooks must still run");
+        assertTrue(lc.socketsClosed().isDone());
+    }
+
+    @Test
+    void blockingCloseHookDoesNotPreventDeadlineFinish() throws Exception {
+        SessionLifecycle<Phase> lc = lc(Duration.ofMillis(200));
+        Socket s = unconnected();
+        lc.register(s);
+        CountDownLatch hookEntered = new CountDownLatch(1);
+        CountDownLatch hookRelease = new CountDownLatch(1);
+        CountDownLatch stopRan = new CountDownLatch(1);
+        lc.addCloseHook(() -> {
+            hookEntered.countDown();
+            try {
+                hookRelease.await();
+            } catch (InterruptedException ignored) {
+                // released at the end of the test
+            }
+        });
+        lc.addStopHook(stopRan::countDown);
+        long start = System.nanoTime();
+        Thread closer = new Thread(() -> lc.close(info("x")));
+        closer.setDaemon(true);
+        closer.start();
+        try {
+            await(hookEntered);
+            lc.socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
+            long socketsMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(socketsMs >= 200 && socketsMs <= 800, "sockets closed by the deadline: " + socketsMs);
+            await(stopRan);
+            lc.terminated().get(WAIT_S, TimeUnit.SECONDS);
+            long terminatedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(terminatedMs <= 800, "terminated by the deadline: " + terminatedMs);
+            assertTrue(s.isClosed());
+        } finally {
+            hookRelease.countDown();
+            closer.join(WAIT_S * 1000L);
+        }
+    }
+
+    @Test
+    void blockingEarlierActionDoesNotDelayForcedDeadline() throws Exception {
+        Duration grace = Duration.ofMillis(200);
+        SessionLifecycle<Phase> lc = lc(grace);
+        Socket s = unconnected();
+        lc.register(s);
+        CountDownLatch actionEntered = new CountDownLatch(1);
+        CountDownLatch actionRelease = new CountDownLatch(1);
+        Thread t = new Thread(() -> lc.atomically(tx -> {
+            tx.after(() -> {
+                actionEntered.countDown();
+                try {
+                    actionRelease.await();
+                } catch (InterruptedException ignored) {
+                    // released at the end of the test
+                }
+            });
+            tx.close(info("x"));
+            return null;
+        }));
+        t.setDaemon(true);
+        t.start();
+        try {
+            await(actionEntered);
+            lc.socketsClosed().get(grace.toMillis() + 600, TimeUnit.MILLISECONDS);
+            assertTrue(s.isClosed());
+        } finally {
+            actionRelease.countDown();
+            t.join(WAIT_S * 1000L);
+        }
+    }
+
+    @Test
+    void writerStartedThroughLifecycleLearnsWhenWorkerIsSkipped() throws Exception {
+        CountDownLatch reached = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ThreadFactory gated = r -> {
+            reached.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                throw new IllegalStateException(e);
+            }
+            return new Thread(r);
+        };
+        SessionLifecycle<Phase> lc = new SessionLifecycle<>(Phase.RESERVED, Phase.CLOSING, System::nanoTime,
+                Duration.ofSeconds(30), scheduler, cleanup, gated);
+        CommandWriter w = new CommandWriter(new java.io.DataOutputStream(new java.io.ByteArrayOutputStream()),
+                t -> {});
+        AtomicReference<CompletableFuture<Void>> writerDone = new AtomicReference<>();
+        assertTrue(txBool(lc, tx -> tx.setGracefulStep(i -> {
+            CompletableFuture<Void> f = w.closeGracefully(Packet.disconnect(Packet.DisconnectReason.USER, "bye"));
+            writerDone.set(f);
+            return f;
+        })));
+        Thread starter = new Thread(() -> w.start(lc::startWorker));
+        starter.setDaemon(true);
+        starter.start();
+        await(reached);
+        lc.close(info("x")); // closes between reservation and thread run
+        release.countDown();
+        starter.join(WAIT_S * 1000L);
+        // far below the 30 s grace: the skipped writer must fail its close future
+        lc.socketsClosed().get(5, TimeUnit.SECONDS);
+        lc.terminated().get(WAIT_S, TimeUnit.SECONDS);
+        assertTrue(writerDone.get().isCompletedExceptionally());
+        assertEquals(CommandWriter.OfferResult.CLOSED, w.offer(Packet.ping(1)));
     }
 
     @Test
@@ -330,26 +473,32 @@ class SessionLifecycleTest {
         CountDownLatch exitGate = new CountDownLatch(1);
         CountDownLatch stopHookRan = new CountDownLatch(1);
         AtomicReference<Throwable> readFailure = new AtomicReference<>();
+        AtomicReference<Thread> worker = new AtomicReference<>();
         assertTrue(lc.startWorker("rd-test-reader", () -> {
+            worker.set(Thread.currentThread());
             try {
                 reading.countDown();
-                s.getInputStream().read();
+                s.getInputStream().read(); // the idle peer never writes: only close can end this read
             } catch (Throwable e) {
                 readFailure.set(e);
             }
-            try {
-                exitGate.await();
-            } catch (InterruptedException ignored) {
-                // interrupted by the close procedure; keep going until the gate opens
-                while (exitGate.getCount() > 0) Thread.onSpinWait();
+            while (true) {
+                try {
+                    exitGate.await();
+                    return;
+                } catch (InterruptedException ignored) {
+                    // interrupted by the close procedure; keep waiting for the gate
+                }
             }
         }));
         await(reading);
         assertEquals(1, lc.liveWorkers());
+        assertFalse(lc.terminated().isDone());
         lc.addStopHook(stopHookRan::countDown);
         lc.close(info("x"));
         lc.socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
         await(stopHookRan);
+        awaitState(worker.get(), Thread.State.WAITING); // read failed, worker provably parked on the gate
         assertFalse(lc.terminated().isDone(), "worker still running");
         exitGate.countDown();
         lc.terminated().get(WAIT_S, TimeUnit.SECONDS);
@@ -592,8 +741,10 @@ class SessionLifecycleTest {
         CountDownLatch blocked = new CountDownLatch(1);
         AtomicBoolean wrapperClosed = new AtomicBoolean();
         AtomicBoolean releasedByInterrupt = new AtomicBoolean();
+        AtomicReference<Thread> worker = new AtomicReference<>();
         assertTrue(lc.startWorker("rd-test-writer", () -> {
             try {
+                worker.set(Thread.currentThread());
                 blocked.countDown();
                 new CountDownLatch(1).await(); // stands in for a writer throttled while holding a wrapper
             } catch (InterruptedException e) {
@@ -601,6 +752,9 @@ class SessionLifecycleTest {
             }
         }));
         await(blocked);
+        awaitState(worker.get(), Thread.State.WAITING);
+        assertFalse(lc.terminated().isDone(), "worker is blocked, session cannot be terminated");
+        assertEquals(1, lc.liveWorkers());
         lc.addStopHook(() -> wrapperClosed.set(true));
         lc.close(info("x"));
         lc.terminated().get(WAIT_S, TimeUnit.SECONDS);

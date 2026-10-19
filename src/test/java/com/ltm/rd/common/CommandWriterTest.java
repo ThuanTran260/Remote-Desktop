@@ -387,6 +387,24 @@ class CommandWriterTest {
     }
 
     @Test
+    void interruptedWriterThreadStopsWriter() throws Exception {
+        AtomicReference<Thread> thread = new AtomicReference<>();
+        CommandWriter w = new CommandWriter(new DataOutputStream(new FakeSink()), 256, r -> {
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            thread.set(t);
+            return t;
+        }, t -> {}, System::nanoTime);
+        writers.add(w);
+        w.start();
+        thread.get().interrupt();
+        thread.get().join(WAIT_S * 1000L);
+        assertFalse(thread.get().isAlive());
+        assertEquals(CommandWriter.OfferResult.CLOSED, w.offer(Packet.ping(1)));
+        assertTrue(w.closeGracefully(null).isCompletedExceptionally());
+    }
+
+    @Test
     void startIsIdempotent() {
         AtomicInteger created = new AtomicInteger();
         CommandWriter w = new CommandWriter(new DataOutputStream(new FakeSink()), 256, r -> {

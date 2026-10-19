@@ -66,6 +66,22 @@ class HeartbeatTest {
     }
 
     @Test
+    void packetBeforeTickAtDeadlineAvoidsTimeout() {
+        Heartbeat hb = heartbeat();
+        assertTrue(hb.onPacketReceived(s(8)));
+        hb.tick(s(8));
+        assertEquals(0, timeouts.get());
+    }
+
+    @Test
+    void tickBeforePacketAtDeadlineRejectsPacket() {
+        Heartbeat hb = heartbeat();
+        hb.tick(s(8));
+        assertFalse(hb.onPacketReceived(s(8)));
+        assertEquals(1, timeouts.get());
+    }
+
+    @Test
     void packetAfterTimeoutIsRejected() {
         Heartbeat hb = heartbeat();
         hb.tick(s(8));
