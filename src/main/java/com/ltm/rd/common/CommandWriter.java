@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
@@ -33,15 +32,15 @@ public final class CommandWriter {
 
     private final Object lock = new Object();
     private final ArrayDeque<Packet> queue = new ArrayDeque<>();
-    private Thread thread; // guarded by lock
+    private Thread thread; // guarded by lock; set when the worker begins running
+    private boolean started; // guarded by lock
     private boolean closing; // guarded by lock
     private boolean stopped; // guarded by lock
     private Throwable failure; // guarded by lock
     private Packet finalPacket; // guarded by lock
     private CompletableFuture<Void> done; // guarded by lock
 
-    private volatile long writeStartedAtNanos;
-    private final AtomicLong writeOperationId = new AtomicLong();
+    private final WriteTracker tracker = new WriteTracker();
 
     public CommandWriter(DataOutputStream out, Consumer<Throwable> onWriteError) {
         this(out, DEFAULT_CAPACITY, CommandWriter::newDaemonThread, onWriteError, System::nanoTime);
@@ -58,20 +57,47 @@ public final class CommandWriter {
     }
 
     private static Thread newDaemonThread(Runnable r) {
-        Thread t = new Thread(r, "rd-cmd-writer-" + THREAD_SEQ.incrementAndGet());
+        Thread t = new Thread(r, "rd-cmd-writer-" + nextThreadName());
         t.setDaemon(true);
         return t;
+    }
+
+    private static String nextThreadName() {
+        return Integer.toString(THREAD_SEQ.incrementAndGet());
     }
 
     /** Starts the writer thread; no effect if already started, closing or stopped. */
     public void start() {
         Thread t;
         synchronized (lock) {
-            if (thread != null || closing || stopped) return;
+            if (started || closing || stopped) return;
             t = threadFactory.newThread(this::run);
             thread = t;
+            started = true;
         }
         t.start();
+    }
+
+    /**
+     * Starts the writer through {@code starter} (e.g. a session lifecycle). Returns false if it
+     * was already started, closing or stopped, or if the starter refused; in the refused case the
+     * writer is stopped, so {@link #offer} returns CLOSED and a pending close future fails.
+     */
+    public boolean start(WorkerStarter starter) {
+        Objects.requireNonNull(starter);
+        synchronized (lock) {
+            if (started || closing || stopped) return false;
+            started = true;
+        }
+        boolean accepted;
+        try {
+            accepted = starter.start("rd-cmd-writer-" + nextThreadName(), this::run);
+        } catch (Throwable e) {
+            stopInternal(false);
+            throw e;
+        }
+        if (!accepted) stopInternal(false);
+        return accepted;
     }
 
     /** Never blocks. A full queue yields OVERFLOW; the caller is responsible for closing the session. */
@@ -110,7 +136,7 @@ public final class CommandWriter {
             }
             closing = true;
             queue.clear();
-            if (thread == null) {
+            if (!started) {
                 done = CompletableFuture.completedFuture(null);
                 return done;
             }
@@ -123,6 +149,11 @@ public final class CommandWriter {
 
     /** Stops the writer thread. Idempotent; a still-pending close future fails. */
     public void stop() {
+        stopInternal(true);
+    }
+
+    /** {@code interrupt} is false when called on the writer thread itself. */
+    private void stopInternal(boolean interrupt) {
         Thread t;
         CompletableFuture<Void> pending;
         synchronized (lock) {
@@ -134,18 +165,23 @@ public final class CommandWriter {
             pending = done;
             lock.notifyAll();
         }
-        if (t != null) t.interrupt();
+        if (interrupt && t != null) t.interrupt();
         if (pending != null) pending.completeExceptionally(new IllegalStateException("writer stopped"));
+    }
+
+    /** Atomic write state; a watchdog expires it, after which this writer sends nothing more. */
+    public WriteTracker tracker() {
+        return tracker;
     }
 
     /** Start of the write in progress (from the injected clock), or 0 when idle. */
     public long writeStartedAtNanos() {
-        return writeStartedAtNanos;
+        return tracker.writeStartedAtNanos();
     }
 
     /** Incremented at the start of every write; lets a watchdog tell one write from the next. */
     public long writeOperationId() {
-        return writeOperationId.get();
+        return tracker.writeOperationId();
     }
 
     /** Copy of the not-yet-started packets, for tests. */
@@ -160,6 +196,7 @@ public final class CommandWriter {
             Packet next;
             CompletableFuture<Void> finish = null;
             synchronized (lock) {
+                if (thread == null) thread = Thread.currentThread();
                 try {
                     while (!stopped && !closing && queue.isEmpty()) lock.wait();
                 } catch (InterruptedException e) {
@@ -184,19 +221,25 @@ public final class CommandWriter {
 
     /** Returns false if the write failed and the loop must end. */
     private boolean write(Packet packet) {
-        writeOperationId.incrementAndGet();
-        long now = nanoClock.getAsLong();
-        writeStartedAtNanos = now == 0 ? 1 : now; // 0 is reserved for "idle"
+        long op = tracker.begin(nanoClock.getAsLong());
+        if (op == WriteTracker.EXPIRED_OP) { // a watchdog declared the previous write stuck
+            stopInternal(false);
+            return false;
+        }
+        boolean ok = false;
         try {
             PacketIO.write(out, packet);
             out.flush();
-            return true;
+            ok = true;
         } catch (Throwable e) { // incl. RuntimeException: the writer thread must never die silently
             fail(e);
-            return false;
         } finally {
-            writeStartedAtNanos = 0;
+            if (!tracker.end(op) && ok) { // expired while writing: send nothing more
+                stopInternal(false);
+                ok = false;
+            }
         }
+        return ok;
     }
 
     private void fail(Throwable cause) {
