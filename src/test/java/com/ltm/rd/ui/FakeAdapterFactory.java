@@ -18,6 +18,16 @@ final class FakeAdapterFactory implements AdapterFactory {
     static final class Gate {
         final CountDownLatch entered = new CountDownLatch(1);
         private final CountDownLatch release = new CountDownLatch(1);
+        private final boolean uninterruptible;
+
+        Gate() {
+            this(false);
+        }
+
+        /** An uninterruptible gate keeps the caller parked even when it is interrupted: a stuck adapter. */
+        Gate(boolean uninterruptible) {
+            this.uninterruptible = uninterruptible;
+        }
 
         boolean awaitEntered() throws InterruptedException {
             return entered.await(10, TimeUnit.SECONDS);
@@ -46,7 +56,11 @@ final class FakeAdapterFactory implements AdapterFactory {
     }
 
     Gate blockNewScreenSource() {
-        Gate g = new Gate();
+        return blockNewScreenSource(false);
+    }
+
+    Gate blockNewScreenSource(boolean uninterruptible) {
+        Gate g = new Gate(uninterruptible);
         newScreenGate = g;
         return g;
     }
@@ -74,12 +88,19 @@ final class FakeAdapterFactory implements AdapterFactory {
         if (gate != null) {
             newScreenGate = null;
             gate.entered.countDown();
-            try {
-                gate.release.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new AdapterException(AdapterException.Kind.ROBOT_UNAVAILABLE, e);
+            boolean interrupted = false;
+            while (gate.release.getCount() > 0) {
+                try {
+                    gate.release.await();
+                } catch (InterruptedException e) {
+                    if (!gate.uninterruptible) {
+                        Thread.currentThread().interrupt();
+                        throw new AdapterException(AdapterException.Kind.ROBOT_UNAVAILABLE, e);
+                    }
+                    interrupted = true;
+                }
             }
+            if (interrupted) Thread.currentThread().interrupt();
         }
         AdapterException failure = newScreenFailure;
         if (failure != null) throw failure;

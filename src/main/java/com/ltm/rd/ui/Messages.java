@@ -17,6 +17,10 @@ public final class Messages {
     public static final String INPUT_RELEASE_FAILED =
             "Không nhả được phím/nút trên máy này. Hãy khởi động lại ứng dụng.";
 
+    /** The input device failed while a session was running; the session was closed. */
+    public static final String INPUT_FAULTED =
+            "Thiết bị nhập liệu bị lỗi nên phiên đã đóng. Hãy khởi động lại ứng dụng.";
+
     private static final String UNKNOWN = "Lỗi không xác định. Xem nhật ký để biết loại lỗi.";
 
     private Messages() {}

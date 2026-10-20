@@ -21,12 +21,46 @@ final class RuntimeTestSupport {
     private RuntimeTestSupport() {}
 
     static AppConfig serverConfig(LongSupplier clock, int cmdPort, int imgPort) {
-        return new AppConfig(LO, cmdPort, imgPort, null, TestTimeouts.relaxed(), clock, Duration.ofSeconds(20));
+        return serverConfig(clock, cmdPort, imgPort, Duration.ofSeconds(20));
+    }
+
+    static AppConfig serverConfig(LongSupplier clock, int cmdPort, int imgPort, Duration budget) {
+        return new AppConfig(LO, cmdPort, imgPort, null, TestTimeouts.relaxed(), clock, budget);
     }
 
     static AppConfig clientConfig(int cmdPort, int imgPort, LongSupplier clock) {
-        return new AppConfig(LO, cmdPort, imgPort, "127.0.0.1", TestTimeouts.relaxed(), clock,
-                Duration.ofSeconds(20));
+        return clientConfig(cmdPort, imgPort, clock, Duration.ofSeconds(20));
+    }
+
+    static AppConfig clientConfig(int cmdPort, int imgPort, LongSupplier clock, Duration budget) {
+        return new AppConfig(LO, cmdPort, imgPort, "127.0.0.1", TestTimeouts.relaxed(), clock, budget);
+    }
+
+    /** Names of the threads that belong to one session; none may outlive it. */
+    private static final String[] SESSION_THREADS = {"rd-connect", "rd-cmd-reader", "rd-cmd-writer-",
+            "rd-screen-sender", "rd-frame-receiver"};
+
+    /** Waits until no thread of a finished session is left that was not already alive in {@code before}. */
+    static void awaitNoSessionThreads(Set<Thread> before) {
+        awaitTrue("session threads gone", () -> {
+            for (Thread t : liveRdThreads()) {
+                if (before.contains(t)) continue;
+                for (String prefix : SESSION_THREADS) {
+                    if (t.getName().startsWith(prefix)) return false;
+                }
+            }
+            return true;
+        });
+    }
+
+    /** Waits until every rd-* thread started after {@code before} is gone (rd-shutdown excepted). */
+    static void awaitNoNewRdThreads(Set<Thread> before) {
+        awaitTrue("rd-* threads back to baseline", () -> {
+            Set<Thread> left = liveRdThreads();
+            left.removeAll(before);
+            left.removeIf(t -> t.getName().equals("rd-shutdown"));
+            return left.isEmpty();
+        });
     }
 
     static <T> T get(CompletableFuture<T> future) throws Exception {

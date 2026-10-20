@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -53,6 +54,13 @@ class AppRuntimeClientTest {
         return t;
     });
 
+    private Set<Thread> baseline;
+
+    @BeforeEach
+    void captureThreads() {
+        baseline = liveRdThreads();
+    }
+
     @AfterEach
     void cleanup() throws Exception {
         gates.forEach(CountDownLatch::countDown);
@@ -61,6 +69,7 @@ class AppRuntimeClientTest {
         for (AppRuntime rt : runtimes) get(rt.shutdownAsync());
         for (ServerCore c : cores) c.close();
         pool.shutdownNow();
+        awaitNoNewRdThreads(baseline); // nothing this test started may outlive it
     }
 
     // ---- fixtures --------------------------------------------------------------------------
@@ -113,6 +122,13 @@ class AppRuntimeClientTest {
         get(cs.inputReleased());
         awaitTrue("server slot", () -> core.sessions().current().isEmpty());
         await(rt, s -> s.phase() == UiPhase.IDLE);
+        assertSessionResourcesReleased(rt);
+    }
+
+    /** After a session ended: no ticker registration and no session thread is left behind. */
+    private void assertSessionResourcesReleased(AppRuntime rt) {
+        awaitTrue("ticker registrations back to 0", () -> rt.tickerRegistrations() == 0);
+        awaitNoSessionThreads(baseline);
     }
 
     /** A clock that can be moved forward without waiting. */
@@ -331,6 +347,7 @@ class AppRuntimeClientTest {
         assertEquals("Đã ngắt kết nối.", idle.message());
         assertEquals(0, cs.inputBeginCount());
         assertEquals(0, cs.senderRuns());
+        assertSessionResourcesReleased(rt);
         assertTrue(adapters.device.log().isEmpty());
     }
 
@@ -419,34 +436,11 @@ class AppRuntimeClientTest {
         assertEquals(2, connectActive(rt, core));
     }
 
-    @Test
-    void staleSessionCompletionDoesNotOverwriteNewSlot() throws Exception {
-        ServerCore core = core();
-        AppRuntime rt = client(core, new FakeAdapterFactory(), AppRuntime.Seams.none());
-        connectActive(rt, core);
-        ClientSession first = session(rt);
-        CountDownLatch late = new CountDownLatch(1);
-        gates.add(late);
-        // a completion callback of the old session that only runs after the new session is up
-        CompletableFuture<Void> lateCallback = first.terminated().thenRunAsync(() -> {
-            try {
-                late.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }, pool);
-        disconnectAndSettle(rt, core);
-        assertEquals(2, connectActive(rt, core));
-        Snapshot second = rt.snapshot();
-
-        late.countDown();
-        get(lateCallback);
-        Snapshot after = rt.snapshot();
-        assertEquals(second.generation(), after.generation());
-        assertEquals(UiPhase.ACTIVE, after.phase());
-        assertEquals("", after.message());
-        assertNotSame(first, session(rt));
-    }
+    // A completion callback of an old session cannot overwrite a newer slot: the snapshot is derived from the
+    // current slot's session object and nothing registers a callback that writes runtime state. The
+    // only way an old attempt could still be running when a new one starts is a prepare that was
+    // cancelled but has not returned; connect() answers BUSY until it ended, which
+    // cancelBeforeSessionCreatedNeverStarts forces with a latch.
 
     @Test
     void wrongCodeShownAsMessageAndPhaseReturnsToIdle() throws Exception {
@@ -476,6 +470,7 @@ class AppRuntimeClientTest {
         assertEquals("Không tạo được Robot. Kiểm tra quyền điều khiển màn hình của hệ điều hành.", s.message());
         assertEquals(0, s.generation());
         assertTrue(core.sessions().current().isEmpty());
+        assertEquals(0, rt.tickerRegistrations(), "a failed prepare registered nothing");
 
         adapters.failNewScreenSource(null);
         assertEquals(ConnectOutcome.STARTED, rt.connect("127.0.0.1", code(core)), "connect is allowed again");
@@ -497,5 +492,42 @@ class AppRuntimeClientTest {
         assertEquals(1, adapters.inputDeviceCalls());
         assertEquals(3, adapters.refreshCalls());
         assertEquals(3, adapters.newScreenCalls());
+    }
+
+    @Test
+    void inputDeviceFaultMidSessionClosesSessionAndStaysFaulted() throws Exception {
+        ServerCore core = core();
+        FakeAdapterFactory adapters = new FakeAdapterFactory();
+        AppRuntime rt = client(core, adapters, AppRuntime.Seams.none());
+        connectActive(rt, core);
+        adapters.device.failOn("keyPress:65");
+        ClientSession cs = session(rt);
+        holdKey(core, adapters, 65); // the device throws on this key: the executor faults mid-session
+
+        get(cs.terminated()); // the runtime closed the session itself
+        assertTrue(cs.lifecycle().isClosed());
+        assertThrows(ExecutionException.class, () -> get(cs.inputReleased()));
+        Snapshot failed = await(rt, s -> s.phase() == UiPhase.FAILED);
+        assertEquals(Messages.INPUT_FAULTED, failed.message());
+        assertEquals(ConnectOutcome.INPUT_FAULTED, rt.connect("127.0.0.1", code(core)));
+        assertEquals(UiPhase.FAILED, rt.snapshot().phase(), "stays faulted");
+        assertEquals(1, adapters.newScreenCalls());
+    }
+
+    @Test
+    void shutdownWithStuckPrepareReportsWorkersNotStopped() throws Exception {
+        ServerCore core = core();
+        FakeAdapterFactory adapters = new FakeAdapterFactory();
+        FakeAdapterFactory.Gate gate = adapters.blockNewScreenSource(true);
+        adapterGates.add(gate);
+        AppRuntime rt = AppRuntime.forClient(
+                clientConfig(core.cmdPort(), core.imgPort(), System::nanoTime, Duration.ofMillis(300)), adapters);
+        runtimes.add(rt);
+        assertEquals(ConnectOutcome.STARTED, rt.connect("127.0.0.1", code(core)));
+        assertTrue(gate.awaitEntered());
+
+        ShutdownReport report = get(rt.shutdownAsync());
+        assertFalse(report.workersStopped(), "rd-app is still parked inside the adapter");
+        gate.open();
     }
 }

@@ -308,6 +308,99 @@ class ServerSessionControlTest {
         assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL), written(session, 2));
     }
 
+    /**
+     * Runs {@code offerInput(epoch, key 17)} and {@code racer} on pool threads that are both queued
+     * on the session lock: the test thread holds the lock until both have started, so the two
+     * transactions contend for it as closely as possible. The short pause only widens the window;
+     * no result depends on it.
+     */
+    private InputOutcome offerRacing(ServerSession session, long epoch, Runnable racer) throws Exception {
+        CountDownLatch started = new CountDownLatch(2);
+        List<Future<?>> futures = session.lifecycle().atomically(tx -> {
+            Future<?> offer = pool.submit(() -> {
+                started.countDown();
+                return session.offerInput(epoch, Packet.keyPress(17));
+            });
+            Future<?> other = pool.submit(() -> {
+                started.countDown();
+                racer.run();
+            });
+            try {
+                started.await(WAIT_S, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            long until = System.nanoTime() + 300_000; // spin: parking is far coarser on Windows
+            while (System.nanoTime() < until) Thread.onSpinWait(); // let both reach the lock
+            return List.of(offer, other);
+        });
+        futures.get(1).get(WAIT_S, TimeUnit.SECONDS);
+        return (InputOutcome) futures.get(0).get(WAIT_S, TimeUnit.SECONDS);
+    }
+
+    /** Like {@link #written} but polls fast: the race tests below run 10_000 iterations. */
+    private List<PacketType> writtenFast(ServerSession session, int count) throws Exception {
+        Sink sink = sinks.get(sessions.indexOf(session));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_S);
+        while (true) {
+            List<PacketType> types = new ArrayList<>();
+            DataInputStream in = new DataInputStream(new ByteArrayInputStream(sink.snapshot()));
+            while (true) {
+                var p = PacketIO.read(in, Protocol.CMD_MAX_LEN, EnumSet.allOf(PacketType.class));
+                if (p.isEmpty()) break;
+                types.add(p.get().type());
+            }
+            if (types.size() >= count) return types;
+            assertTrue(System.nanoTime() < deadline, "timed out waiting for " + count + " packets, have " + types);
+            LockSupport.parkNanos(20_000);
+        }
+    }
+
+    /**
+     * offerInput(0, key) races the stall decision that closes the gate. Whatever interleaving wins,
+     * the writer queue must agree with the outcome: SENT means the key was queued before RELEASE_ALL,
+     * anything else means no key was queued at all. A gate check and an offer in separate
+     * transactions would let the key slip in after RELEASE_ALL.
+     */
+    @Test
+    void offerInputRacingStallStartNeverQueuesKeyAfterReleaseAll() throws Exception {
+        int sent = 0;
+        for (int i = 0; i < 10_000; i++) {
+            ServerSession session = active();
+            session.publishFrame(1, image(), s(1)); // gate open at epoch 0
+            InputOutcome outcome = offerRacing(session, 0, () -> session.tick(s(4))); // STALL_START
+            if (outcome == InputOutcome.SENT) {
+                sent++;
+                assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.KEY_PRESS, PacketType.RELEASE_ALL),
+                        writtenFast(session, 3), "iteration " + i);
+            } else {
+                assertTrue(outcome == InputOutcome.GATE_CLOSED || outcome == InputOutcome.STALE_EPOCH,
+                        "iteration " + i + ": " + outcome);
+                assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL), writtenFast(session, 2),
+                        "iteration " + i);
+            }
+            session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "done", false));
+        }
+        assertTrue(sent > 0 && sent < 10_000, "both interleavings must occur, sent=" + sent);
+    }
+
+    /** offerInput with the epoch of the stall races the frame that ends the stall: it can never be sent. */
+    @Test
+    void offerInputRacingStallEndWithStalledEpochIsNeverSent() throws Exception {
+        for (int i = 0; i < 10_000; i++) {
+            ServerSession session = active();
+            session.publishFrame(1, image(), s(1));
+            session.tick(s(4)); // STALL_START: epoch 1, gate closed
+            assertEquals(1, session.inputEpoch());
+            InputOutcome outcome = offerRacing(session, 1, () -> session.publishFrame(1, image(), s(5))); // STALL_END
+            assertTrue(outcome == InputOutcome.GATE_CLOSED || outcome == InputOutcome.STALE_EPOCH,
+                    "iteration " + i + ": " + outcome);
+            assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL), writtenFast(session, 2),
+                    "iteration " + i);
+            session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "done", false));
+        }
+    }
+
     @Test
     void offerInputRejectsNonInputPackets() throws Exception {
         ServerSession session = active();

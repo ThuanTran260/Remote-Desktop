@@ -86,6 +86,7 @@ public final class AppRuntime implements Controller {
         ClientSession session; // null while the adapters are prepared
         boolean cancelled;
         boolean ended; // no session will ever exist for this slot (adapter failure or cancelled early)
+        boolean faultClosed; // the runtime closed the session because the input device faulted
         String failure = "";
         int screenWidth;
         int screenHeight;
@@ -96,12 +97,13 @@ public final class AppRuntime implements Controller {
         }
 
         SlotView view() {
-            return new SlotView(generation, host, session, cancelled, ended, failure, screenWidth, screenHeight);
+            return new SlotView(generation, host, session, cancelled, ended, failure, screenWidth, screenHeight,
+                    faultClosed);
         }
     }
 
     private record SlotView(long generation, String host, ClientSession session, boolean cancelled, boolean ended,
-            String failure, int screenWidth, int screenHeight) {}
+            String failure, int screenWidth, int screenHeight, boolean faultClosed) {}
 
     private final LaunchOptions.Role role;
     private final AppConfig cfg;
@@ -433,12 +435,12 @@ public final class AppRuntime implements Controller {
             }
             cs = slot.session;
         }
-        ClientPhase phase = cs.phase();
-        boolean preActive = phase == ClientPhase.CONNECTING || phase == ClientPhase.AUTHENTICATING
-                || phase == ClientPhase.ATTACHING;
-        if (!preActive) return false;
-        cs.cancel();
-        return true;
+        // each closeIf decides and closes in one transaction, so an ACTIVE session is never closed here;
+        // the phase only moves forward, so a session that left CONNECTING is caught by a later check
+        CloseInfo info = new CloseInfo(Packet.DisconnectReason.USER, "cancelled", true);
+        var lifecycle = cs.lifecycle();
+        return lifecycle.closeIf(ClientPhase.CONNECTING, info) || lifecycle.closeIf(ClientPhase.AUTHENTICATING, info)
+                || lifecycle.closeIf(ClientPhase.ATTACHING, info);
     }
 
     // ---- both roles ----------------------------------------------------------------------------
@@ -508,8 +510,17 @@ public final class AppRuntime implements Controller {
         }
         int cmdPort = c.cmdPort();
         int imgPort = c.imgPort();
-        String code = c.sessions().currentCode();
-        ServerSession session = c.sessions().current().orElse(null);
+        // code and session are read until the session did not change around the code read: the manager
+        // issues a new code only while no session exists, so a code read with a session absent on both
+        // sides belongs to the LISTENING state shown
+        String code;
+        ServerSession session;
+        while (true) {
+            ServerSession before = c.sessions().current().orElse(null);
+            code = c.sessions().currentCode();
+            session = c.sessions().current().orElse(null);
+            if (before == session) break;
+        }
         if (session == null) {
             return new Snapshot(role, UiPhase.LISTENING, 0, 0, message, null, cmdPort, imgPort, code, 0, 0, null, 0,
                     false, TrafficStats.ZERO);
@@ -572,9 +583,9 @@ public final class AppRuntime implements Controller {
         }
         CompletableFuture<Void> released = cs.inputReleased();
         if (released.isCompletedExceptionally()) {
-            return blank(UiPhase.FAILED, Messages.INPUT_RELEASE_FAILED);
+            return blank(UiPhase.FAILED, v.faultClosed() ? Messages.INPUT_FAULTED : Messages.INPUT_RELEASE_FAILED);
         }
-        String message = closeMessage(cs);
+        String message = v.faultClosed() ? Messages.INPUT_FAULTED : closeMessage(cs);
         if (cs.terminated().isDone() && released.isDone()) {
             return blank(UiPhase.IDLE, message);
         }
@@ -607,6 +618,23 @@ public final class AppRuntime implements Controller {
     private void onInputFault(Throwable t) {
         lastInputFault = t;
         LOG.log(System.Logger.Level.WARNING, "input device fault: " + t.getClass().getSimpleName());
+        ClientSlot s;
+        ClientSession cs;
+        synchronized (lock) {
+            s = slot;
+            cs = s == null ? null : s.session;
+        }
+        // A fault while the session is still open means input can no longer be trusted: close the session.
+        // A fault of the final release (session already closed) is reported as a release failure instead.
+        if (cs == null || cs.lifecycle().isClosed()) return;
+        synchronized (lock) {
+            s.faultClosed = true;
+        }
+        if (!cs.lifecycle().close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "input fault", true))) {
+            synchronized (lock) {
+                s.faultClosed = false; // somebody else closed it first
+            }
+        }
     }
 
     // ---- shutdown --------------------------------------------------------------------------------
@@ -632,23 +660,28 @@ public final class AppRuntime implements Controller {
         InputRelease release = InputRelease.NOT_NEEDED;
         try {
             app.shutdown(); // no new work; a running start or prepare sees the flag
+            boolean appStopped = false;
             try {
-                if (!app.awaitTermination(remainingNanos(deadline), TimeUnit.NANOSECONDS)) app.shutdownNow();
+                appStopped = app.awaitTermination(remainingNanos(deadline), TimeUnit.NANOSECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                app.shutdownNow();
             }
+            if (!appStopped) app.shutdownNow(); // interrupt a task stuck in an adapter or a bind
+            workersStopped = appStopped; // rd-app counts as a worker, for both roles
             if (role == LaunchOptions.Role.SERVER) {
                 ServerCore c;
                 synchronized (lock) {
                     c = core;
                 }
                 if (c != null) {
-                    ServerSession session = c.sessions().current().orElse(null);
+                    // a session reserved while close() runs is only visible afterwards, so look on both sides
+                    ServerSession before = c.sessions().current().orElse(null);
                     c.close();
-                    if (session != null) {
-                        socketsClosed = session.socketsClosed().isDone();
-                        workersStopped = session.terminated().isDone();
+                    ServerSession after = c.sessions().current().orElse(null);
+                    for (ServerSession session : new ServerSession[] {before, after == before ? null : after}) {
+                        if (session == null) continue;
+                        socketsClosed &= session.socketsClosed().isDone();
+                        workersStopped &= session.terminated().isDone();
                     }
                 }
             } else {
@@ -662,7 +695,7 @@ public final class AppRuntime implements Controller {
                     await(cs.terminated(), deadline);
                     await(cs.inputReleased(), deadline);
                     socketsClosed = cs.socketsClosed().isDone();
-                    workersStopped = cs.terminated().isDone();
+                    workersStopped &= cs.terminated().isDone();
                     CompletableFuture<Void> released = cs.inputReleased();
                     if (cs.inputBeginCount() > 0) {
                         release = released.isCompletedExceptionally() ? InputRelease.FAILED

@@ -38,12 +38,17 @@ public final class ServerCore implements AutoCloseable {
     /**
      * Hooks for tests in this package; {@link #none()} in production. The runnables may be null.
      * {@code afterTokenCheck} runs inside the session lock, {@code beforeAttachImage} outside any
-     * lock; {@code pendingTickDisabled} leaves pending connections to their soTimeout fallback.
+     * lock, {@code afterBind} between the bind and the publication of the sockets; {@code pendingTickDisabled} leaves pending connections to their soTimeout fallback.
      */
     record Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
-            boolean pendingTickDisabled) {
+            boolean pendingTickDisabled, Runnable afterBind) {
+        Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
+                boolean pendingTickDisabled) {
+            this(lifecycleThreads, afterTokenCheck, beforeAttachImage, pendingTickDisabled, null);
+        }
+
         static Seams none() {
-            return new Seams(null, null, null, false);
+            return new Seams(null, null, null, false, null);
         }
     }
 
@@ -113,8 +118,14 @@ public final class ServerCore implements AutoCloseable {
             closeQuietly(img);
             throw e;
         }
+        if (seams.afterBind() != null) seams.afterBind().run(); // test seam: a close() racing the bind
         cmdSocket = cmd;
         imgSocket = img;
+        if (closed.get()) { // close() ran before the sockets were published: it could not close them
+            closeQuietly(cmd);
+            closeQuietly(img);
+            throw new IllegalStateException("server is closed");
+        }
         scheduler = Executors.newSingleThreadScheduledExecutor(factory("rd-close-timer", false));
         cleanup = Executors.newCachedThreadPool(factory("rd-cleanup-", true));
         Ticker t = new Ticker(timeouts.tick(), clock);

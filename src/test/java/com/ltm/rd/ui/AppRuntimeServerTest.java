@@ -12,8 +12,10 @@ import java.net.BindException;
 import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -23,10 +25,18 @@ class AppRuntimeServerTest {
     private final List<AppRuntime> runtimes = new ArrayList<>();
     private final List<AutoCloseable> resources = new ArrayList<>();
 
+    private Set<Thread> baseline;
+
+    @BeforeEach
+    void captureThreads() {
+        baseline = liveRdThreads();
+    }
+
     @AfterEach
     void cleanup() throws Exception {
         for (AutoCloseable r : resources) r.close();
         for (AppRuntime rt : runtimes) get(rt.shutdownAsync());
+        awaitNoNewRdThreads(baseline); // nothing this test started may outlive it
     }
 
     private AppRuntime server(int cmdPort) {
@@ -86,6 +96,8 @@ class AppRuntimeServerTest {
         assertEquals(UiPhase.FAILED, failed.phase());
         assertEquals("Cổng đã được sử dụng. Đổi bằng --cmd-port/--img-port.", failed.message());
         assertNull(failed.code());
+        assertEquals(0, rt.tickerRegistrations(), "the failed core registered nothing that is still live");
+        assertNull(rt.serverCore(), "the failed core was dropped");
 
         occupied.close();
         get(rt.startServer()); // a new ServerCore: the failed one cannot be reused
@@ -154,6 +166,7 @@ class AppRuntimeServerTest {
     @Test
     void disconnectReturnsToListeningWithNewCode() throws Exception {
         AppRuntime rt = startedServer();
+        int idleTickers = rt.tickerRegistrations();
         connectedClient(rt, new FakeAdapterFactory());
         Snapshot active = await(rt, s -> s.phase() == UiPhase.ACTIVE);
         assertEquals(1, active.generation());
@@ -166,6 +179,8 @@ class AppRuntimeServerTest {
         assertEquals(0, back.generation());
         assertEquals("Đã ngắt kết nối.", back.message());
         assertFalse(rt.disconnect(), "nothing left to close");
+        awaitTrue("ticker registrations back to the idle count", () -> rt.tickerRegistrations() == idleTickers);
+        awaitNoSessionThreads(baseline);
     }
 
     @Test

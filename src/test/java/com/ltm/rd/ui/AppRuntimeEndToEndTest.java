@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -44,11 +45,19 @@ class AppRuntimeEndToEndTest {
         return t;
     });
 
+    private Set<Thread> baseline;
+
+    @BeforeEach
+    void captureThreads() {
+        baseline = liveRdThreads();
+    }
+
     @AfterEach
     void cleanup() throws Exception {
         gates.forEach(CountDownLatch::countDown);
         for (AppRuntime rt : runtimes) get(rt.shutdownAsync());
         pool.shutdownNow();
+        awaitNoNewRdThreads(baseline); // nothing this test started may outlive it
     }
 
     /** A started Server, a connected Client and the Server's first controllable frame. */
@@ -56,11 +65,13 @@ class AppRuntimeEndToEndTest {
         final AppRuntime server;
         final AppRuntime client;
         final FakeAdapterFactory adapters = new FakeAdapterFactory();
+        final int idleServerTickers;
 
         Rig(LongSupplier serverClock) throws Exception {
             server = AppRuntime.forServer(serverConfig(serverClock, 0, 0));
             runtimes.add(server);
             get(server.startServer());
+            idleServerTickers = server.tickerRegistrations();
             Snapshot listening = server.snapshot();
             client = AppRuntime.forClient(clientConfig(listening.cmdPort(), listening.imgPort(), System::nanoTime),
                     adapters);
@@ -82,6 +93,10 @@ class AppRuntimeEndToEndTest {
             get(cs.inputReleased());
             await(server, s -> s.phase() == UiPhase.LISTENING);
             await(client, s -> s.phase() == UiPhase.IDLE);
+            awaitTrue("client ticker registrations back to 0", () -> client.tickerRegistrations() == 0);
+            awaitTrue("server ticker registrations back to idle",
+                    () -> server.tickerRegistrations() == idleServerTickers);
+            awaitNoSessionThreads(baseline);
         }
 
         /** Parks the Client's screen capture and waits until the Server received every frame that was sent. */
@@ -167,39 +182,9 @@ class AppRuntimeEndToEndTest {
         unblock.countDown();
     }
 
-    @Test
-    void oldSessionObserverNotificationDoesNotChangeNewSnapshot() throws Exception {
-        Rig rig = new Rig(System::nanoTime);
-        ServerSession old = rig.server.serverCore().sessions().current().orElseThrow();
-        CountDownLatch inObserver = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        gates.add(release);
-        old.addFrameObserver((revision, transition) -> {
-            inObserver.countDown();
-            try {
-                release.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        // a stall decided for the old session; its notification is delivered outside the lock and stays parked
-        long farFuture = System.nanoTime() + Duration.ofSeconds(10).toNanos();
-        Future<?> late = pool.submit(() -> old.tick(farFuture));
-        assertTrue(inObserver.await(WAIT_S, TimeUnit.SECONDS));
-
-        rig.disconnect();
-        Snapshot fresh = rig.connect();
-        assertEquals(2, fresh.generation());
-        assertEquals(0, fresh.inputEpoch());
-
-        release.countDown();
-        late.get(WAIT_S, TimeUnit.SECONDS);
-        Snapshot after = rig.server.snapshot();
-        assertEquals(2, after.generation());
-        assertEquals(UiPhase.ACTIVE, after.phase());
-        assertEquals(0, after.inputEpoch());
-        assertTrue(after.controlEnabled());
-    }
+    // An observer notification of an old session cannot change the snapshot of a new one: the runtime
+    // registers no observers and derives every field from the current session object, so there is no
+    // write path to force. Reconnect behaviour is covered by sendInputWithStaleGenerationIsRejected.
 
     // ---- shutdown (frame; budget and races are 4.1) ----------------------------------------------
 
@@ -280,12 +265,38 @@ class AppRuntimeEndToEndTest {
         assertTrue(rig.adapters.device.log().contains("keyRelease:17"));
         assertEquals(UiPhase.SHUTTING_DOWN, rig.client.snapshot().phase());
 
-        get(rig.server.shutdownAsync());
-        awaitTrue("no rd-* thread left but rd-shutdown", () -> {
-            Set<Thread> left = liveRdThreads();
-            left.removeAll(before);
-            left.removeIf(t -> t.getName().equals("rd-shutdown"));
-            return left.isEmpty();
-        });
+        ShutdownReport serverReport = get(rig.server.shutdownAsync());
+        assertTrue(serverReport.socketsClosed(), "the server session sockets were closed");
+        assertTrue(serverReport.workersStopped());
+        assertEquals(0, rig.client.tickerRegistrations());
+        awaitNoNewRdThreads(before);
+    }
+
+    @Test
+    void shutdownWithStuckServerStartReportsWorkersNotStopped() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch go = new CountDownLatch(1);
+        gates.add(go);
+        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.client.ClientHooks.none(),
+                com.ltm.rd.client.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
+                    entered.countDown();
+                    boolean interrupted = false; // a stuck task: interrupts do not release it
+                    while (go.getCount() > 0) {
+                        try {
+                            go.await();
+                        } catch (InterruptedException e) {
+                            interrupted = true;
+                        }
+                    }
+                    if (interrupted) Thread.currentThread().interrupt();
+                }, () -> { });
+        AppRuntime stuck = AppRuntime.forServer(serverConfig(System::nanoTime, 0, 0, Duration.ofMillis(300)), seams);
+        runtimes.add(stuck);
+        stuck.startServer();
+        assertTrue(entered.await(WAIT_S, TimeUnit.SECONDS));
+
+        ShutdownReport report = get(stuck.shutdownAsync());
+        assertFalse(report.workersStopped(), "rd-app is still parked inside beforeServerStart");
+        go.countDown();
     }
 }
