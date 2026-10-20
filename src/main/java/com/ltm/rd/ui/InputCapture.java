@@ -2,7 +2,11 @@ package com.ltm.rd.ui;
 
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.Protocol;
+import java.awt.event.FocusEvent;
+import java.awt.event.FocusListener;
 import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
+import java.awt.event.KeyListener;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.awt.event.MouseMotionListener;
@@ -24,26 +28,46 @@ import java.util.function.BooleanSupplier;
  * a button whose press was accepted, and held state is dropped whenever the applied generation or
  * epoch changes, never restored.
  */
-public final class InputCapture implements MouseListener, MouseMotionListener, MouseWheelListener {
+public final class InputCapture
+        implements MouseListener, MouseMotionListener, MouseWheelListener, KeyListener, FocusListener {
     private static final int MAX_WHEEL_PACKETS = 3;
+
+    /**
+     * How key repeats are handled unless a caller says otherwise. Not yet confirmed by the Robot
+     * spike of Task 3.1 (no result is in): SEND_ALL is the plan's default. Change it here, in one
+     * place, once the spike result and the keyboard trial decide.
+     */
+    public static final RepeatPolicy DEFAULT_REPEAT_POLICY = RepeatPolicy.SEND_ALL;
 
     private final Controller sink;
     private final RemotePanel panel;
     private final BooleanSupplier focusOwner;
     private final Runnable requestFocus;
+    private final RepeatPolicy repeatPolicy;
 
     // EDT only
     private final Set<Integer> swallowed = new HashSet<>();
     private final Set<Integer> held = new HashSet<>();
+    private final Set<Integer> heldKeys = new HashSet<>();
+    private boolean acceptingInput = true;
+    private boolean releaseRequested; // a focus-loss release is pending: later notifications are duplicates
     private double wheelAcc;
     private long appliedGeneration = Long.MIN_VALUE;
     private long appliedEpoch = Long.MIN_VALUE;
 
     public InputCapture(Controller sink, RemotePanel panel, BooleanSupplier focusOwner, Runnable requestFocus) {
+        this(sink, panel, focusOwner, requestFocus, DEFAULT_REPEAT_POLICY);
+    }
+
+    public InputCapture(Controller sink, RemotePanel panel, BooleanSupplier focusOwner, Runnable requestFocus,
+            RepeatPolicy repeatPolicy) {
         this.sink = sink;
         this.panel = panel;
         this.focusOwner = focusOwner;
         this.requestFocus = requestFocus;
+        this.repeatPolicy = repeatPolicy;
+        panel.setFocusable(true);
+        panel.setFocusTraversalKeysEnabled(false); // Tab is input for the remote machine, not focus traversal
     }
 
     /** Call after {@link RemotePanel#apply}; a changed generation or epoch drops the held state. */
@@ -66,9 +90,21 @@ public final class InputCapture implements MouseListener, MouseMotionListener, M
         return wheelAcc;
     }
 
-    /** Forgets held buttons and the wheel remainder. Swallowed buttons stay: each ends with its own release. */
+    /** Whether new events are accepted: false from a focus loss until the focus is back. */
+    public boolean acceptingInput() {
+        Edt.requireEdt();
+        return acceptingInput;
+    }
+
+    public int heldKeyCount() {
+        Edt.requireEdt();
+        return heldKeys.size();
+    }
+
+    /** Forgets held keys, buttons and the wheel remainder. Swallowed buttons stay: each ends with its own release. */
     private void resetHeldState() {
         held.clear();
+        heldKeys.clear();
         wheelAcc = 0;
     }
 
@@ -84,7 +120,7 @@ public final class InputCapture implements MouseListener, MouseMotionListener, M
             swallowed.add(button);
             return;
         }
-        if (button < 1 || button > 3) return;
+        if (button < 1 || button > 3 || !acceptingInput) return;
         Optional<RemotePanel.InputGate> gate = panel.inputGate();
         if (gate.isEmpty()) return;
         Optional<CoordinateMapper.RemotePoint> p = panel.toRemote(e.getX(), e.getY());
@@ -143,7 +179,7 @@ public final class InputCapture implements MouseListener, MouseMotionListener, M
     @Override
     public void mouseWheelMoved(MouseWheelEvent e) {
         Edt.requireEdt();
-        if (!focusOwner.getAsBoolean()) return;
+        if (!acceptingInput || !focusOwner.getAsBoolean()) return;
         Optional<RemotePanel.InputGate> gate = panel.inputGate();
         if (gate.isEmpty()) return;
         wheelAcc += e.getPreciseWheelRotation();
@@ -170,6 +206,83 @@ public final class InputCapture implements MouseListener, MouseMotionListener, M
     @Override
     public void mouseExited(MouseEvent e) {
         // not used
+    }
+
+    // ---- keyboard --------------------------------------------------------------------------------
+
+    /** Virtual key codes only; the panel never sees keyTyped content, and no input method is involved. */
+    @Override
+    public void keyPressed(KeyEvent e) {
+        Edt.requireEdt();
+        int code = e.getKeyCode();
+        if (code == KeyEvent.VK_UNDEFINED) return;
+        Optional<RemotePanel.InputGate> gate = keyGate();
+        if (gate.isEmpty()) return;
+        e.consume();
+        boolean repeat = heldKeys.contains(code);
+        if (repeat && repeatPolicy == RepeatPolicy.FIRST_PRESS_ONLY) return;
+        if (send(gate.get(), Packet.keyPress(code)) == SendResult.SENT) heldKeys.add(code);
+    }
+
+    @Override
+    public void keyReleased(KeyEvent e) {
+        Edt.requireEdt();
+        int code = e.getKeyCode();
+        if (code == KeyEvent.VK_UNDEFINED || !heldKeys.remove(code)) return;
+        e.consume();
+        Optional<RemotePanel.InputGate> gate = panel.inputGate();
+        if (gate.isEmpty()) return; // stalled: the Server already sent RELEASE_ALL
+        send(gate.get(), Packet.keyRelease(code));
+    }
+
+    @Override
+    public void keyTyped(KeyEvent e) {
+        // not used: only key codes are forwarded
+    }
+
+    /** Keys count only with focus, a displayed frame under control and no pending focus-loss release. */
+    private Optional<RemotePanel.InputGate> keyGate() {
+        if (!acceptingInput || !focusOwner.getAsBoolean()) return Optional.empty();
+        return panel.inputGate();
+    }
+
+    // ---- focus loss and disconnect ---------------------------------------------------------------
+
+    @Override
+    public void focusGained(FocusEvent e) {
+        Edt.requireEdt();
+        acceptingInput = true;
+        releaseRequested = false;
+    }
+
+    @Override
+    public void focusLost(FocusEvent e) {
+        loseInput();
+    }
+
+    /** Called when the window with the panel is deactivated (for example Alt+Tab). */
+    public void windowDeactivated() {
+        Edt.requireEdt();
+        loseInput();
+    }
+
+    /** Called when the user disconnects or closes the control window. */
+    public void disconnecting() {
+        Edt.requireEdt();
+        loseInput();
+    }
+
+    /**
+     * Stops accepting events and asks the Server to have the controlled side release everything,
+     * once per loss, even when the image gate is closed. Held state is dropped and never restored.
+     */
+    private void loseInput() {
+        Edt.requireEdt();
+        if (releaseRequested) return; // duplicate notification of the same loss
+        releaseRequested = true;
+        acceptingInput = false;
+        resetHeldState();
+        if (appliedGeneration > 0) sink.releaseControlInput(appliedGeneration);
     }
 
     private SendResult send(RemotePanel.InputGate gate, Packet packet) {

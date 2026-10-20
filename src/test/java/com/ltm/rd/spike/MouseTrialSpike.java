@@ -24,7 +24,7 @@ import javax.swing.JLabel;
 import javax.swing.SwingUtilities;
 
 /**
- * Manual trial window for the mouse (Task 3.4) and, later, the keyboard (Task 3.5) on two real
+ * Manual trial window for the mouse (Task 3.4) and the keyboard (Task 3.5) on two real
  * Windows machines. Not run by {@code mvn verify}: the class name matches no Surefire pattern.
  * It drives the production runtime, capture and panel classes with the real
  * {@link RobotAdapterFactory}; only the window around them is temporary.
@@ -120,6 +120,8 @@ public final class MouseTrialSpike {
         panel.addMouseListener(capture);
         panel.addMouseMotionListener(capture);
         panel.addMouseWheelListener(capture);
+        panel.addKeyListener(capture); // Task 3.5: key codes only, Tab included
+        panel.addFocusListener(capture);
 
         JLabel status = new JLabel(" ");
         JButton disconnect = new JButton("Disconnect");
@@ -140,16 +142,25 @@ public final class MouseTrialSpike {
         timer.start();
 
         Runnable exit = () -> {
+            capture.disconnecting(); // asks the controlled side to release everything before the sockets close
             timer.stop();
             pump.close();
             frame.dispose();
             shutdownAndExit(server, loopbackClient);
         };
-        disconnect.addActionListener(e -> server.disconnect());
+        disconnect.addActionListener(e -> {
+            capture.disconnecting();
+            server.disconnect();
+        });
         frame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
                 exit.run();
+            }
+
+            @Override
+            public void windowDeactivated(WindowEvent e) { // Alt+Tab away while holding a key
+                capture.windowDeactivated();
             }
         });
         frame.setVisible(true);
