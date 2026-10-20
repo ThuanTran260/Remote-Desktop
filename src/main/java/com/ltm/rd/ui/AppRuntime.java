@@ -128,6 +128,7 @@ public final class AppRuntime implements Controller {
     private ServerCore core;
     private ServerState serverState = ServerState.IDLE;
     private String serverMessage = "";
+    private ServerSession observedSession; // the newest server session a snapshot has seen
 
     private AppRuntime(LaunchOptions.Role role, AppConfig cfg, AdapterFactory adapters, Seams seams)
             throws AdapterException {
@@ -525,6 +526,7 @@ public final class AppRuntime implements Controller {
             return new Snapshot(role, UiPhase.LISTENING, 0, 0, message, null, cmdPort, imgPort, code, 0, 0, null, 0,
                     false, TrafficStats.ZERO);
         }
+        watchClose(session);
         ControlView view = session.controlView();
         Optional<CloseInfo> closed = session.closeInfo();
         UiPhase phase;
@@ -546,6 +548,26 @@ public final class AppRuntime implements Controller {
                 session.peer().getHostAddress(), cmdPort, imgPort, code, screen.map(Packet.SizePayload::width).orElse(0),
                 screen.map(Packet.SizePayload::height).orElse(0), view.frame(), view.framesReceived(),
                 view.controlEnabled(), stats(t, rtt));
+    }
+
+    /**
+     * Remembers why a session ended even if it is gone between two snapshots: the message is recorded
+     * when its sockets are closed, as long as no newer session has been seen since.
+     */
+    private void watchClose(ServerSession session) {
+        boolean fresh;
+        synchronized (lock) {
+            fresh = observedSession != session;
+            if (fresh) observedSession = session;
+        }
+        if (!fresh) return;
+        session.socketsClosed().thenAccept(info -> {
+            synchronized (lock) {
+                if (observedSession == session && serverState == ServerState.STARTED) {
+                    serverMessage = Messages.forClose(info.reason());
+                }
+            }
+        });
     }
 
     private void rememberServerMessage(String message) {
