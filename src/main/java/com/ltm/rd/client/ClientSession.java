@@ -15,6 +15,7 @@ import com.ltm.rd.common.Tickable;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.common.TrafficCounter;
+import com.ltm.rd.common.TrafficSnapshot;
 import com.ltm.rd.common.WriteWatchdog;
 import java.awt.Rectangle;
 import java.io.IOException;
@@ -24,6 +25,7 @@ import java.net.SocketTimeoutException;
 import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -74,6 +76,8 @@ public final class ClientSession implements Tickable {
     private CommandWriter writer;
     private CommandReceiver receiver;
     private Channel imageChannel;
+    private Channel commandChannel;
+    private volatile ScreenSender sender;
     private volatile ScreenGeometry announced; // the geometry SCREEN_INFO was derived from
 
     private volatile Heartbeat heartbeat;
@@ -146,6 +150,27 @@ public final class ClientSession implements Tickable {
 
     public SessionLifecycle<ClientPhase> lifecycle() {
         return lifecycle;
+    }
+
+    /** Byte totals of the two channels; zero for a channel that is not attached yet. */
+    public TrafficSnapshot traffic() {
+        return lifecycle.atomically(tx -> new TrafficSnapshot(
+                commandChannel == null ? 0 : commandChannel.traffic().bytesIn(),
+                commandChannel == null ? 0 : commandChannel.traffic().bytesOut(),
+                imageChannel == null ? 0 : imageChannel.traffic().bytesIn(),
+                imageChannel == null ? 0 : imageChannel.traffic().bytesOut()));
+    }
+
+    /** Round-trip time of the last answered ping; empty before the first answer. */
+    public OptionalLong rttNanos() {
+        Heartbeat hb = heartbeat;
+        return hb == null ? OptionalLong.empty() : hb.lastRttNanos();
+    }
+
+    /** Frames the screen sender wrote and flushed. */
+    public long framesSent() {
+        ScreenSender s = sender;
+        return s == null ? 0 : s.framesSent();
     }
 
     // Observability for tests: how far the two start conditions and the start itself got.
@@ -288,6 +313,7 @@ public final class ClientSession implements Tickable {
                     info.sendDisconnect() ? Packet.disconnect(info.reason(), info.message()) : null));
             if (!stepSet) return false; // closed: the writer must not start
             writer = w;
+            commandChannel = ch;
             receiver = new CommandReceiver(input, generation, bounds, w);
             Heartbeat hb = new Heartbeat(w, timeouts.pingInterval(), timeouts.liveness(),
                     cfg.nanoClock().getAsLong(),
@@ -399,6 +425,7 @@ public final class ClientSession implements Tickable {
         Channel img = lifecycle.atomically(tx -> imageChannel);
         ScreenSender sender = new ScreenSender(this, img, screen,
                 new FrameEncoder(Protocol.MAX_FRAME_WIDTH, FRAME_QUALITY), FPS, cfg.nanoClock());
+        this.sender = sender;
         WriteWatchdog dog = new WriteWatchdog(sender.tracker(), timeouts.imgWriteLimit(),
                 () -> lifecycle.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "image write stuck", true)));
         Ticker.Registration registration = ticker.register(dog);

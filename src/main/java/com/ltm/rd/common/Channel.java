@@ -7,13 +7,23 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.util.Objects;
 import java.util.function.UnaryOperator;
 
 /**
  * A socket with its stream wrappers. The wrappers are created once and handed over as a unit
  * (never re-wrap the socket streams: a BufferedInputStream may already hold prefetched bytes).
  */
-public record Channel(Socket socket, DataInputStream in, DataOutputStream out) {
+public record Channel(Socket socket, DataInputStream in, DataOutputStream out, TrafficCounter traffic) {
+
+    public Channel {
+        Objects.requireNonNull(traffic);
+    }
+
+    /** A channel with a counter of its own, for tests and callers that do not count through {@link #wrap}. */
+    public Channel(Socket socket, DataInputStream in, DataOutputStream out) {
+        this(socket, in, out, new TrafficCounter());
+    }
 
     public static Channel wrap(Socket socket, TrafficCounter counter) throws IOException {
         return wrap(socket, counter, UnaryOperator.identity());
@@ -29,7 +39,7 @@ public record Channel(Socket socket, DataInputStream in, DataOutputStream out) {
                 new BufferedInputStream(counter.countingInput(socket.getInputStream())));
         OutputStream raw = outputDecorator.apply(socket.getOutputStream());
         DataOutputStream out = new DataOutputStream(new BufferedOutputStream(counter.countingOutput(raw)));
-        return new Channel(socket, in, out);
+        return new Channel(socket, in, out, counter);
     }
 
     /** Closes only the socket; never flushes the wrappers, so blocked readers/writers are released. */

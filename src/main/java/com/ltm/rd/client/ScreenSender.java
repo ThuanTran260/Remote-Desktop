@@ -10,6 +10,7 @@ import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongSupplier;
 
@@ -31,6 +32,7 @@ public final class ScreenSender {
     private final long periodNanos;
     private final LongSupplier clock;
     private final WriteTracker tracker = new WriteTracker();
+    private final AtomicLong framesSent = new AtomicLong();
 
     public ScreenSender(ClientSession session, Channel img, ScreenSource screen, FrameEncoder encoder, int fps,
             LongSupplier nanoClock) {
@@ -46,6 +48,11 @@ public final class ScreenSender {
     /** The write state a watchdog observes; EXPIRED ends the loop. */
     public WriteTracker tracker() {
         return tracker;
+    }
+
+    /** Frames written and flushed so far. */
+    public long framesSent() {
+        return framesSent.get();
     }
 
     /** The worker body, to run through {@code lifecycle.startWorker("rd-screen-sender", ...)}. */
@@ -83,6 +90,7 @@ public final class ScreenSender {
                 try {
                     PacketIO.write(img.out(), packet);
                     img.out().flush();
+                    framesSent.incrementAndGet();
                 } finally {
                     intact = tracker.end(op);
                 }

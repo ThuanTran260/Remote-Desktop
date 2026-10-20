@@ -13,6 +13,7 @@ import com.ltm.rd.common.SessionLifecycle;
 import com.ltm.rd.common.Tickable;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
+import com.ltm.rd.common.TrafficSnapshot;
 import com.ltm.rd.common.WriteWatchdog;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
@@ -23,7 +24,9 @@ import java.security.MessageDigest;
 import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
@@ -77,6 +80,7 @@ public final class ServerSession implements Tickable {
     private BufferedImage latestFrame;
     private long framesReceived;
     private long releaseAllSent;
+    private long controlReleasesSent;
 
     private volatile long activeAtNanos;
     private volatile boolean framesExpected; // cheap pre-check for the ticker; true once ACTIVE
@@ -394,10 +398,7 @@ public final class ServerSession implements Tickable {
      * closed the result is CLOSED.
      */
     public CommandWriter.OfferResult offerInput(Packet p) {
-        switch (p.type()) {
-            case MOUSE_MOVE, MOUSE_PRESS, MOUSE_RELEASE, WHEEL, KEY_PRESS, KEY_RELEASE -> { }
-            default -> throw new IllegalArgumentException("not an input packet: " + p.type());
-        }
+        requireInputPacket(p);
         return lifecycle.atomically(tx -> {
             if (!gateOpen(tx) || writer == null) return CommandWriter.OfferResult.CLOSED;
             CommandWriter.OfferResult result = writer.offer(p);
@@ -406,6 +407,115 @@ public final class ServerSession implements Tickable {
             }
             return result;
         });
+    }
+
+    /**
+     * Like {@link #offerInput(Packet)} but for the frame the user saw: gate, then epoch, then the
+     * offer, all in one transaction. During a stall the result is GATE_CLOSED; after the stall ended
+     * an old epoch is STALE_EPOCH, so input aimed at an earlier picture is never sent.
+     */
+    public InputOutcome offerInput(long inputEpoch, Packet p) {
+        requireInputPacket(p);
+        return lifecycle.atomically(tx -> {
+            if (!gateOpen(tx) || writer == null) return InputOutcome.GATE_CLOSED;
+            if (inputEpoch != monitor.revision()) return InputOutcome.STALE_EPOCH;
+            switch (writer.offer(p)) {
+                case OVERFLOW -> {
+                    tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
+                    return InputOutcome.OVERFLOW;
+                }
+                case CLOSED -> {
+                    return InputOutcome.GATE_CLOSED;
+                }
+                default -> {
+                    return InputOutcome.SENT; // ACCEPTED, or a mouse move coalesced into the queued one
+                }
+            }
+        });
+    }
+
+    private static void requireInputPacket(Packet p) {
+        switch (p.type()) {
+            case MOUSE_MOVE, MOUSE_PRESS, MOUSE_RELEASE, WHEEL, KEY_PRESS, KEY_RELEASE -> { }
+            default -> throw new IllegalArgumentException("not an input packet: " + p.type());
+        }
+    }
+
+    /**
+     * Asks the Client to release everything it holds (focus lost, user disconnect). Independent of
+     * the frame gate: while frames stall this is exactly when it is needed. CLOSED when the session
+     * is closed or not ACTIVE; a full queue closes the session with OVERFLOW.
+     */
+    public CommandWriter.OfferResult releaseControlInput() {
+        return lifecycle.atomically(tx -> {
+            if (tx.isClosed() || tx.phase() != ServerPhase.ACTIVE || writer == null) {
+                return CommandWriter.OfferResult.CLOSED;
+            }
+            CommandWriter.OfferResult result = writer.offer(Packet.releaseAll());
+            switch (result) {
+                case ACCEPTED -> controlReleasesSent++;
+                case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW,
+                        "command queue overflow", true));
+                default -> { }
+            }
+            return result;
+        });
+    }
+
+    /** RELEASE_ALL packets the command writer accepted on request of {@link #releaseControlInput()}. */
+    public long controlReleasesSent() {
+        return lifecycle.atomically(tx -> controlReleasesSent);
+    }
+
+    /**
+     * The input epoch: the frame monitor's revision, 0 before the session is ACTIVE. It changes on
+     * every stall start, stall end and timeout, so any change means "the picture the user aimed at
+     * is gone".
+     */
+    public long inputEpoch() {
+        return lifecycle.atomically(tx -> monitor == null ? 0 : monitor.revision());
+    }
+
+    /** Gate, epoch, latest frame and frame count read in one transaction. */
+    public ControlView controlView() {
+        return lifecycle.atomically(tx -> new ControlView(generation, tx.phase(), gateOpen(tx),
+                monitor == null ? 0 : monitor.revision(), latestFrame, framesReceived));
+    }
+
+    // ---- close, observability for the UI ------------------------------------------------------
+
+    /** The user ends the session: DISCONNECT(USER) is sent to the Client. */
+    public void disconnect() {
+        lifecycle.close(new CloseInfo(Packet.DisconnectReason.USER, "disconnected", true));
+    }
+
+    /** Completes when every socket of the session is closed. */
+    public CompletableFuture<CloseInfo> socketsClosed() {
+        return lifecycle.socketsClosed();
+    }
+
+    /** Completes when the session is closed, its sockets are closed and its workers have stopped. */
+    public CompletableFuture<CloseInfo> terminated() {
+        return lifecycle.terminated();
+    }
+
+    public Optional<CloseInfo> closeInfo() {
+        return lifecycle.closeInfo();
+    }
+
+    /** Round-trip time of the last answered ping; empty before the first answer. */
+    public OptionalLong rttNanos() {
+        Heartbeat hb = heartbeat;
+        return hb == null ? OptionalLong.empty() : hb.lastRttNanos();
+    }
+
+    /** Byte totals of the two channels; zero for a channel that is not attached yet. */
+    public TrafficSnapshot traffic() {
+        return lifecycle.atomically(tx -> new TrafficSnapshot(
+                cmdChannel == null ? 0 : cmdChannel.traffic().bytesIn(),
+                cmdChannel == null ? 0 : cmdChannel.traffic().bytesOut(),
+                imageChannel == null ? 0 : imageChannel.traffic().bytesIn(),
+                imageChannel == null ? 0 : imageChannel.traffic().bytesOut()));
     }
 
     public Optional<BufferedImage> latestFrame() {

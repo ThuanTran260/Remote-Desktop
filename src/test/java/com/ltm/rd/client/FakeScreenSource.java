@@ -16,6 +16,7 @@ public final class FakeScreenSource implements ScreenSource {
     private volatile int captureWidth;
     private volatile int captureHeight;
     private volatile CountDownLatch gate;
+    private volatile CountDownLatch blockedSignal = new CountDownLatch(1);
     private final AtomicReference<Runnable> nextCaptureHook = new AtomicReference<>();
     private final AtomicInteger captures = new AtomicInteger();
     private volatile boolean failing;
@@ -43,8 +44,14 @@ public final class FakeScreenSource implements ScreenSource {
     /** Blocks every capture until the returned latch is counted down. */
     public CountDownLatch blockCaptures() {
         CountDownLatch latch = new CountDownLatch(1);
+        blockedSignal = new CountDownLatch(1);
         gate = latch;
         return latch;
+    }
+
+    /** Waits until a capture is parked on the gate set by the last {@link #blockCaptures()}. */
+    public boolean awaitBlocked(long timeout, java.util.concurrent.TimeUnit unit) throws InterruptedException {
+        return blockedSignal.await(timeout, unit);
     }
 
     /** Runs {@code hook} once, at the start of the next capture. */
@@ -69,6 +76,7 @@ public final class FakeScreenSource implements ScreenSource {
         if (failing) throw new java.io.IOException("capture failed");
         CountDownLatch g = gate;
         if (g != null) {
+            blockedSignal.countDown();
             try {
                 g.await();
             } catch (InterruptedException e) {
