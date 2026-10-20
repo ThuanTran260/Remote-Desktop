@@ -10,16 +10,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /** Records calls as "name:args" strings; supports blocking and failure injection per call. */
-final class FakeInputDevice implements InputDevice {
-    static final class Gate {
-        final CountDownLatch entered = new CountDownLatch(1);
-        final CountDownLatch release = new CountDownLatch(1);
+public final class FakeInputDevice implements InputDevice {
+    public static final class Gate {
+        public final CountDownLatch entered = new CountDownLatch(1);
+        public final CountDownLatch release = new CountDownLatch(1);
 
-        boolean awaitEntered() throws InterruptedException {
+        public boolean awaitEntered() throws InterruptedException {
             return entered.await(2, TimeUnit.SECONDS);
         }
 
-        void open() {
+        public void open() {
             release.countDown();
         }
     }
@@ -31,7 +31,7 @@ final class FakeInputDevice implements InputDevice {
     private final Set<String> illegalArgs = new HashSet<>();
 
     /** The next call named {@code call} blocks until the returned gate is opened. */
-    Gate blockOn(String call) {
+    public Gate blockOn(String call) {
         Gate g = new Gate();
         synchronized (logLock) {
             gates.put(call, g);
@@ -39,26 +39,26 @@ final class FakeInputDevice implements InputDevice {
         return g;
     }
 
-    void failOn(String call) {
+    public void failOn(String call) {
         synchronized (logLock) {
             failures.add(call);
         }
     }
 
-    void illegalArgOn(String call) {
+    public void illegalArgOn(String call) {
         synchronized (logLock) {
             illegalArgs.add(call);
         }
     }
 
-    List<String> log() {
+    public List<String> log() {
         synchronized (logLock) {
             return new ArrayList<>(log);
         }
     }
 
     /** Waits (bounded) until the log contains {@code call}. */
-    boolean awaitCall(String call) throws InterruptedException {
+    public boolean awaitCall(String call) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
         synchronized (logLock) {
             while (!log.contains(call)) {

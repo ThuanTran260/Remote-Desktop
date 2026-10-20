@@ -116,9 +116,14 @@ public record Packet(PacketType type, byte[] payload) {
     }
 
     public static Packet attach(byte[] token) {
+        return attach(Protocol.VERSION, token);
+    }
+
+    /** Allows a non-current version so a server's rejection of a bad ATTACH version can be exercised. */
+    public static Packet attach(int version, byte[] token) {
         Objects.requireNonNull(token, "token");
         ByteBuffer b = ByteBuffer.allocate(5 + token.length);
-        b.putInt(Protocol.MAGIC).put((byte) Protocol.VERSION).put(token);
+        b.putInt(Protocol.MAGIC).put((byte) version).put(token);
         return new Packet(PacketType.ATTACH, b.array());
     }
 

@@ -4,7 +4,7 @@
 
 Phần mềm điều khiển máy tính từ xa trong mạng LAN, viết bằng **Java thuần**: Socket TCP, `java.awt.Robot` và Swing, không dùng thư viện runtime bên ngoài. Đồ án môn Lập trình mạng.
 
-> **Trạng thái:** đang phát triển. Đã xong các module nền (codec giao thức, hàng đợi ghi lệnh, bộ thực thi thao tác). Kết nối mạng, phiên làm việc và giao diện **chưa chạy được end-to-end**. Tiến độ chi tiết xem [kế hoạch triển khai](docs/superpowers/plans/2026-10-19-remote-desktop-implementation.md).
+> **Trạng thái:** đang phát triển. Đã xong các module nền (codec giao thức, hàng đợi ghi lệnh, bộ thực thi thao tác, mã hóa/giải mã JPEG) và lõi mạng: bắt tay hai kênh có xác thực mã, phiên làm việc, luồng ảnh và thao tác chuột/phím chạy end-to-end giữa hai đầu socket (Server và Client) bằng adapter giả trên `127.0.0.1`, kèm timeout, cổng điều khiển khi ảnh bị đứng và đóng phiên có kiểm soát. **Chưa có** giao diện Swing, `Robot` thật (chụp màn hình, giả lập chuột/phím), launcher chạy thật và thử trên hai máy; chưa kết luận về Windows thật, DPI, key repeat hay mạng LAN. Tiến độ chi tiết xem [kế hoạch triển khai](docs/superpowers/plans/2026-10-19-remote-desktop-implementation.md).
 
 ## Vai trò
 
