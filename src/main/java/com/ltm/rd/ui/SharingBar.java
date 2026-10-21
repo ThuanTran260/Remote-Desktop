@@ -17,9 +17,13 @@ import javax.swing.JLabel;
  */
 final class SharingBar extends JFrame {
     private final JLabel label = new JLabel(" ");
+    private final BarLayoutGate gate = new BarLayoutGate();
 
     SharingBar(Controller controller) {
         super("Đang chia sẻ màn hình");
+        // never take keyboard focus: injected keys must not reach this bar; the mouse still works
+        setFocusableWindowState(false);
+        setAutoRequestFocus(false);
         setUndecorated(true);
         setAlwaysOnTop(true);
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
@@ -39,6 +43,8 @@ final class SharingBar extends JFrame {
 
     /** EDT. */
     void showFor(String text) {
+        boolean relayout = gate.needsLayout(text, isVisible());
+        if (!relayout) return;
         label.setText(text);
         pack();
         Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();

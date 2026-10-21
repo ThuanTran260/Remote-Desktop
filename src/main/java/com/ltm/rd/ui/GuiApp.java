@@ -24,19 +24,24 @@ public final class GuiApp {
 
     private static void start(LaunchOptions options) {
         try {
-            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-        } catch (Exception e) {
-            // the default look and feel is fine
-        }
-        if (options.role() == LaunchOptions.Role.CHOOSER) {
-            RoleChooserFrame[] chooser = new RoleChooserFrame[1];
-            chooser[0] = new RoleChooserFrame(role -> {
-                chooser[0].dispose();
-                openRole(new LaunchOptions(role, false, options.cmdPort(), options.imgPort(), options.host()));
-            }, () -> System.exit(0));
-            chooser[0].setVisible(true);
-        } else {
-            openRole(options);
+            try {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+            } catch (Exception e) {
+                // the default look and feel is fine
+            }
+            if (options.role() == LaunchOptions.Role.CHOOSER) {
+                RoleChooserFrame[] chooser = new RoleChooserFrame[1];
+                chooser[0] = new RoleChooserFrame(role -> {
+                    // start the non-daemon init thread before the chooser goes away, so no gap exists
+                    openRole(new LaunchOptions(role, false, options.cmdPort(), options.imgPort(), options.host()));
+                    chooser[0].dispose();
+                }, () -> System.exit(0));
+                chooser[0].setVisible(true);
+            } else {
+                openRole(options);
+            }
+        } catch (Throwable t) {
+            fail(Messages.forThrowable(t));
         }
     }
 
@@ -52,24 +57,33 @@ public final class GuiApp {
                     AppRuntime runtime = AppRuntime.forClient(cfg, new RobotAdapterFactory());
                     EventQueue.invokeLater(() -> showClient(runtime, options.host()));
                 }
-            } catch (Exception e) {
-                String text = Messages.forThrowable(e);
+            } catch (Throwable t) {
+                String text = Messages.forThrowable(t);
                 EventQueue.invokeLater(() -> fail(text));
             }
         }, "rd-gui-init");
-        init.setDaemon(true);
+        // non-daemon: keeps the JVM alive until the role window is shown (AWT auto-shutdown otherwise)
+        init.setDaemon(false);
         init.start();
     }
 
     private static void showServer(AppRuntime runtime, List<String> addresses) {
-        ServerFrame frame = new ServerFrame(runtime, addresses, () -> exitAfterShutdown(runtime));
-        frame.setVisible(true);
-        runtime.startServer(); // a failure shows up as FAILED in the next snapshot
+        try {
+            ServerFrame frame = new ServerFrame(runtime, addresses, () -> exitAfterShutdown(runtime));
+            frame.setVisible(true);
+            runtime.startServer(); // a failure shows up as FAILED in the next snapshot
+        } catch (Throwable t) {
+            fail(Messages.forThrowable(t));
+        }
     }
 
     private static void showClient(AppRuntime runtime, String presetHost) {
-        ClientFrame frame = new ClientFrame(runtime, presetHost, () -> exitAfterShutdown(runtime));
-        frame.setVisible(true);
+        try {
+            ClientFrame frame = new ClientFrame(runtime, presetHost, () -> exitAfterShutdown(runtime));
+            frame.setVisible(true);
+        } catch (Throwable t) {
+            fail(Messages.forThrowable(t));
+        }
     }
 
     private static void fail(String text) {
