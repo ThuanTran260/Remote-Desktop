@@ -34,6 +34,66 @@
           <release>21</release>
         </configuration>
       </plugin>
+      <!-- Coverage data must come from this build only. This extra execution runs before the
+           JaCoCo agent (same phase, declared first) and deletes only the two JaCoCo outputs. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-clean-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>reset-coverage-data</id>
+            <phase>initialize</phase>
+            <goals>
+              <goal>clean</goal>
+            </goals>
+            <configuration>
+              <excludeDefaultDirectories>true</excludeDefaultDirectories>
+              <fast>false</fast>
+              <failOnError>true</failOnError>
+              <followSymLinks>false</followSymLinks>
+              <filesets>
+                <fileset>
+                  <directory>${project.build.directory}</directory>
+                  <includes>
+                    <include>jacoco.exec</include>
+                  </includes>
+                  <followSymlinks>false</followSymlinks>
+                </fileset>
+                <fileset>
+                  <directory>${project.build.directory}/site/jacoco</directory>
+                  <followSymlinks>false</followSymlinks>
+                </fileset>
+              </filesets>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.16</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <phase>initialize</phase>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+            <configuration>
+              <append>false</append>
+            </configuration>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <!-- Declared after JaCoCo so the verify-phase coverage check runs after the report. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-enforcer-plugin</artifactId>
@@ -56,6 +116,25 @@
               </rules>
             </configuration>
           </execution>
+          <execution>
+            <id>require-coverage-data</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <requireFilesExist>
+                  <files>
+                    <file>${project.build.directory}/jacoco.exec</file>
+                    <file>${project.build.directory}/site/jacoco/jacoco.csv</file>
+                    <file>${project.build.directory}/site/jacoco/jacoco.xml</file>
+                  </files>
+                  <message>JaCoCo execution data or report is missing for this build.</message>
+                </requireFilesExist>
+              </rules>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
       <plugin>
@@ -63,6 +142,10 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.5</version>
         <configuration>
+          <!-- One reused fork: a single JaCoCo agent writes one jacoco.exec per build.
+               If an argLine is ever added here it must contain @{argLine}. -->
+          <forkCount>1</forkCount>
+          <reuseForks>true</reuseForks>
           <systemPropertyVariables>
             <java.awt.headless>true</java.awt.headless>
           </systemPropertyVariables>
