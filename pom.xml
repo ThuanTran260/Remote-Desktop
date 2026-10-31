@@ -91,6 +91,35 @@
               <goal>report</goal>
             </goals>
           </execution>
+          <!-- Declared after report so it runs after it. One rule, listing exact class names: JaCoCo
+               ignores an include that matches no class, so CoverageTargetsTest keeps this list equal
+               to src/test/resources/coverage-targets.txt and loads every name. -->
+          <execution>
+            <id>check-branch-coverage</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <rule>
+                  <element>CLASS</element>
+                  <includes>
+                    <include>com.ltm.rd.server.ServerSession</include>
+                    <include>com.ltm.rd.client.ClientSession</include>
+                    <include>com.ltm.rd.server.HandshakeHandler</include>
+                  </includes>
+                  <limits>
+                    <limit>
+                      <counter>BRANCH</counter>
+                      <value>COVEREDRATIO</value>
+                      <minimum>0.80</minimum>
+                    </limit>
+                  </limits>
+                </rule>
+              </rules>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
       <!-- Declared after JaCoCo so the verify-phase coverage check runs after the report. -->
