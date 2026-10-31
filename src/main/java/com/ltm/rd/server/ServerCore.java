@@ -38,17 +38,24 @@ public final class ServerCore implements AutoCloseable {
     /**
      * Hooks for tests in this package; {@link #none()} in production. The runnables may be null.
      * {@code afterTokenCheck} runs inside the session lock, {@code beforeAttachImage} outside any
-     * lock, {@code afterBind} between the bind and the publication of the sockets; {@code pendingTickDisabled} leaves pending connections to their soTimeout fallback.
+     * lock, {@code afterBind} between the bind and the publication of the sockets, {@code beforeResources}
+     * after the sockets are published and before the executors, ticker, pool and acceptors are created;
+     * {@code pendingTickDisabled} leaves pending connections to their soTimeout fallback.
      */
     record Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
-            boolean pendingTickDisabled, Runnable afterBind) {
+            boolean pendingTickDisabled, Runnable afterBind, Runnable beforeResources) {
+        Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
+                boolean pendingTickDisabled, Runnable afterBind) {
+            this(lifecycleThreads, afterTokenCheck, beforeAttachImage, pendingTickDisabled, afterBind, null);
+        }
+
         Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
                 boolean pendingTickDisabled) {
-            this(lifecycleThreads, afterTokenCheck, beforeAttachImage, pendingTickDisabled, null);
+            this(lifecycleThreads, afterTokenCheck, beforeAttachImage, pendingTickDisabled, null, null);
         }
 
         static Seams none() {
-            return new Seams(null, null, null, false, null);
+            return new Seams(null, null, null, false, null, null);
         }
     }
 
@@ -126,6 +133,7 @@ public final class ServerCore implements AutoCloseable {
             closeQuietly(img);
             throw new IllegalStateException("server is closed");
         }
+        if (seams.beforeResources() != null) seams.beforeResources().run(); // test seam: a close() racing the setup
         scheduler = Executors.newSingleThreadScheduledExecutor(factory("rd-close-timer", false));
         cleanup = Executors.newCachedThreadPool(factory("rd-cleanup-", true));
         Ticker t = new Ticker(timeouts.tick(), clock);
@@ -135,6 +143,16 @@ public final class ServerCore implements AutoCloseable {
                 new ArrayBlockingQueue<>(POOL_QUEUE), factory("rd-handshake-", true), rejectionHandler());
         acceptCmd = startAcceptor("rd-accept-cmd", cmd, HandshakeHandler.Kind.COMMAND);
         acceptImg = startAcceptor("rd-accept-img", img, HandshakeHandler.Kind.IMAGE);
+        // close() sets 'closed' before it reads the fields above. If it read one of them before this method
+        // assigned it, 'closed' is already true here (both are volatile accesses), so this check catches every
+        // resource close() could have missed; if 'closed' is still false, close() has not read the fields yet
+        // and will see all of them.
+        if (closed.get()) {
+            closeQuietly(cmd);
+            closeQuietly(img);
+            releaseResources(null, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLOSE_WAIT_MS));
+            throw new IllegalStateException("server is closed");
+        }
     }
 
     private ServerSocket bind(int port) throws IOException {
@@ -251,6 +269,15 @@ public final class ServerCore implements AutoCloseable {
         if (session != null) {
             session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.SHUTDOWN, "server shutting down", true));
         }
+        releaseResources(session, deadline);
+    }
+
+    /**
+     * Stops the acceptors, the pool, the ticker and the executors, and waits (bounded by {@code deadline})
+     * for the given session to terminate. Called by {@link #close()} and by a {@link #start()} that found
+     * itself overtaken by it, so it is idempotent and may run on both threads at once. It takes no lock.
+     */
+    private void releaseResources(ServerSession session, long deadline) {
         // acceptors first: nothing can be added to the pool or the pending set after they are gone
         join(acceptCmd, deadline);
         join(acceptImg, deadline);
