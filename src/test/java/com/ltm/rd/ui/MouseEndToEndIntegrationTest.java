@@ -77,11 +77,12 @@ class MouseEndToEndIntegrationTest {
             refresh();
         }
 
-        /** What the snapshot timer does: apply the newest snapshot, then tell the capture. */
+        /** What the snapshot timer does: apply the newest snapshot, paint it, then tell the capture. */
         Snapshot refresh() throws Exception {
             Snapshot s = server.snapshot();
             SwingUtilities.invokeAndWait(() -> {
                 panel.apply(s);
+                PaintSupport.paintNow(panel); // the gate opens only once the frame is painted
                 capture.onApplied(s.generation(), s.inputEpoch());
             });
             return s;

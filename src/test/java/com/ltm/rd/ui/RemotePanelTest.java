@@ -8,6 +8,7 @@ import java.awt.Graphics2D;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.SwingUtilities;
 import org.junit.jupiter.api.Test;
@@ -44,14 +45,11 @@ class RemotePanelTest {
     }
 
     private static BufferedImage paint(RemotePanel panel) throws Exception {
-        BufferedImage canvas = new BufferedImage(Math.max(1, panel.getWidth()), Math.max(1, panel.getHeight()),
-                BufferedImage.TYPE_INT_RGB);
-        onEdt(() -> {
-            Graphics2D g = canvas.createGraphics();
-            panel.paint(g);
-            g.dispose();
-        });
-        return canvas;
+        return PaintSupport.paintOnEdt(panel);
+    }
+
+    private static Optional<RemotePanel.InputGate> gate(RemotePanel panel) throws Exception {
+        return onEdt(() -> panel.inputGate());
     }
 
     private static RemotePanel panel(int w, int h) {
@@ -134,6 +132,7 @@ class RemotePanelTest {
     void inputGateCarriesGenerationAndEpochOfAppliedSnapshot() throws Exception {
         RemotePanel panel = panel(1000, 400);
         onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, solid(8, 8, RED))));
+        paint(panel); // the gate opens only once the frame is painted
         assertEquals(new RemotePanel.InputGate(7, 3), onEdt(() -> panel.inputGate()).orElseThrow());
     }
 
@@ -142,6 +141,7 @@ class RemotePanelTest {
         RemotePanel panel = panel(1000, 400);
         BufferedImage newest = solid(8, 8, RED);
         onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, newest)));
+        paint(panel);
         onEdt(() -> panel.apply(snapshot(6, 9, true, 1280, 720, solid(8, 8, 0x00FF00))));
         onEdt(() -> panel.apply(snapshot(7, 2, true, 1280, 720, solid(8, 8, 0x00FF00))));
         assertEquals(new RemotePanel.InputGate(7, 3), onEdt(() -> panel.inputGate()).orElseThrow());
@@ -155,12 +155,15 @@ class RemotePanelTest {
     void noSessionSnapshotClearsFrameAndGate() throws Exception {
         RemotePanel panel = panel(1000, 400);
         onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, solid(8, 8, RED))));
+        paint(panel);
+        assertTrue(onEdt(() -> panel.inputGate()).isPresent(), "precondition: the gate was open");
         onEdt(() -> panel.apply(snapshot(0, 0, false, 0, 0, null))); // the session ended
         assertTrue(onEdt(() -> panel.inputGate()).isEmpty());
         assertTrue(panel.toRemote(500, 200).isEmpty());
         assertEquals(BACKGROUND, paint(panel).getRGB(500, 200) & 0xFFFFFF);
         // a later session, even with a smaller generation number than before, applies again
         onEdt(() -> panel.apply(snapshot(2, 0, true, 1920, 1080, solid(8, 8, RED))));
+        paint(panel);
         assertEquals(new RemotePanel.InputGate(2, 0), onEdt(() -> panel.inputGate()).orElseThrow());
     }
 
@@ -171,6 +174,122 @@ class RemotePanelTest {
         assertThrows(IllegalStateException.class, () -> panel.apply(s));
         assertThrows(IllegalStateException.class, panel::inputGate);
         onEdt(() -> panel.apply(s)); // runs on the EDT
+        paint(panel);
         assertTrue(onEdt(() -> panel.inputGate()).isPresent());
+    }
+
+    // ---- the gate opens only after the frame is painted --------------------------------------------
+
+    @Test
+    void gateOpensOnlyAfterTheAppliedFrameIsPainted() throws Exception {
+        RemotePanel panel = panel(1000, 400);
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, solid(8, 8, RED))));
+        assertTrue(gate(panel).isEmpty(), "applied but not yet painted: the user has not seen the frame");
+        paint(panel);
+        assertEquals(new RemotePanel.InputGate(7, 3), gate(panel).orElseThrow());
+    }
+
+    @Test
+    void disablingControlClosesAnOpenGateWithoutPaint() throws Exception {
+        RemotePanel panel = panel(1000, 400);
+        BufferedImage frame = solid(8, 8, RED);
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, frame)));
+        paint(panel);
+        assertTrue(gate(panel).isPresent(), "precondition: the gate was open");
+        onEdt(() -> panel.apply(snapshot(7, 3, false, 1920, 1080, frame)));
+        assertTrue(gate(panel).isEmpty(), "closing takes effect at once, no paint needed");
+    }
+
+    @Test
+    void newEpochClosesAnOpenGateUntilPaintedAgain() throws Exception {
+        RemotePanel panel = panel(1000, 400);
+        BufferedImage frame = solid(8, 8, RED);
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, frame)));
+        paint(panel);
+        onEdt(() -> panel.apply(snapshot(7, 4, true, 1920, 1080, frame)));
+        assertTrue(gate(panel).isEmpty(), "a newer epoch closes the old gate at once, even for the same image");
+        paint(panel);
+        assertEquals(new RemotePanel.InputGate(7, 4), gate(panel).orElseThrow());
+    }
+
+    @Test
+    void newGenerationClosesAnOpenGateUntilPaintedAgain() throws Exception {
+        RemotePanel panel = panel(1000, 400);
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, solid(8, 8, RED))));
+        paint(panel);
+        onEdt(() -> panel.apply(snapshot(8, 0, true, 1920, 1080, solid(8, 8, 0x00FF00))));
+        assertTrue(gate(panel).isEmpty());
+        paint(panel);
+        assertEquals(new RemotePanel.InputGate(8, 0), gate(panel).orElseThrow());
+    }
+
+    @Test
+    void sameGenerationAndEpochKeepsAnOpenGateWhenANewFrameArrives() throws Exception {
+        RemotePanel panel = panel(1000, 400);
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, solid(8, 8, RED))));
+        paint(panel);
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, solid(8, 8, 0x00FF00)))); // the next frame
+        assertEquals(new RemotePanel.InputGate(7, 3), gate(panel).orElseThrow(),
+                "the (generation, epoch) was already seen; a fresher frame does not flicker the gate");
+    }
+
+    @Test
+    void zeroSizePanelNeverOpensTheGate() throws Exception {
+        RemotePanel panel = panel(0, 0);
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, solid(8, 8, RED))));
+        paint(panel);
+        paint(panel);
+        assertTrue(gate(panel).isEmpty(), "nothing can be seen in an empty rectangle");
+    }
+
+    @Test
+    void stallRecoveryOpensOnlyAfterPaint() throws Exception {
+        RemotePanel panel = panel(1000, 400);
+        BufferedImage frame = solid(8, 8, RED);
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, frame)));
+        paint(panel);
+        onEdt(() -> panel.apply(snapshot(7, 3, false, 1920, 1080, frame))); // stall: control disabled
+        assertTrue(gate(panel).isEmpty());
+        onEdt(() -> panel.apply(snapshot(7, 4, true, 1920, 1080, frame))); // recovery: same generation, newer epoch
+        assertTrue(gate(panel).isEmpty(), "control is back but the recovered frame is not painted yet");
+        paint(panel);
+        assertEquals(new RemotePanel.InputGate(7, 4), gate(panel).orElseThrow());
+    }
+
+    @Test
+    void enablingControlOnTheSameEpochAlsoWaitsForPaint() throws Exception {
+        RemotePanel panel = panel(1000, 400);
+        BufferedImage frame = solid(8, 8, RED);
+        onEdt(() -> panel.apply(snapshot(7, 3, false, 1920, 1080, frame)));
+        paint(panel);
+        assertTrue(gate(panel).isEmpty(), "control disabled: painting alone never opens the gate");
+        onEdt(() -> panel.apply(snapshot(7, 3, true, 1920, 1080, frame)));
+        assertTrue(gate(panel).isEmpty());
+        paint(panel);
+        assertEquals(new RemotePanel.InputGate(7, 3), gate(panel).orElseThrow());
+    }
+
+    @Test
+    void generationZeroNeverOpensTheGateEvenIfItClaimsControl() throws Exception {
+        RemotePanel panel = panel(1000, 400);
+        onEdt(() -> panel.apply(snapshot(0, 0, true, 1920, 1080, solid(8, 8, RED))));
+        paint(panel);
+        assertTrue(gate(panel).isEmpty(), "generation 0 means no session");
+    }
+
+    @Test
+    void paintingWhileControlIsDisabledOrFrameMissingNeverOpensTheGate() throws Exception {
+        RemotePanel disabled = panel(1000, 400);
+        onEdt(() -> disabled.apply(snapshot(7, 3, false, 1920, 1080, solid(8, 8, RED))));
+        paint(disabled);
+        assertTrue(gate(disabled).isEmpty());
+        RemotePanel noFrame = panel(1000, 400);
+        onEdt(() -> noFrame.apply(snapshot(7, 3, true, 1920, 1080, null)));
+        paint(noFrame);
+        assertTrue(gate(noFrame).isEmpty());
+        RemotePanel noScreen = panel(1000, 400);
+        onEdt(() -> noScreen.apply(snapshot(7, 3, true, 0, 0, solid(8, 8, RED))));
+        paint(noScreen);
+        assertTrue(gate(noScreen).isEmpty());
     }
 }
