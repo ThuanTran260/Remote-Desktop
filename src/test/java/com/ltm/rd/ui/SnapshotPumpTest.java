@@ -91,6 +91,38 @@ class SnapshotPumpTest {
         assertEquals(1000, pump.polls());
     }
 
+    /** The first call throws, every later call answers with its own number. */
+    private static CountingController throwsOnce() {
+        return new CountingController(n -> {
+            if (n == 1) throw new IllegalStateException("boom");
+            return snapshotWithFrames(n);
+        });
+    }
+
+    @Test
+    void pollOnceSurvivesAThrowingControllerAndKeepsPolling() {
+        CountingController controller = throwsOnce();
+        SnapshotPump pump = new SnapshotPump(controller);
+        assertDoesNotThrow(pump::pollOnce, "one failing snapshot() must not escape the poll");
+        assertNull(pump.latest(), "a failed poll publishes nothing");
+        assertEquals(0, pump.polls(), "a failed poll is not a completed poll");
+        pump.pollOnce();
+        assertEquals(2, pump.latest().frameCount(), "the next poll updates latest again");
+        assertEquals(1, pump.polls());
+    }
+
+    @Test
+    void runningPumpKeepsPollingAfterThePollThrew() throws Exception {
+        CountingController controller = throwsOnce();
+        try (SnapshotPump pump = new SnapshotPump(controller, Duration.ofMillis(1))) {
+            // a scheduled task that throws is never run again, so a later snapshot proves the poll survived
+            awaitTrue("a snapshot after the failed first poll", () -> pump.latest() != null);
+            assertTrue(pump.latest().frameCount() >= 2);
+            long polls = pump.polls();
+            awaitTrue("polling goes on", () -> pump.polls() > polls);
+        }
+    }
+
     @Test
     void runningPumpPublishesNewestAnswer() throws Exception {
         CountingController controller = new CountingController(n -> snapshotWithFrames(Math.min(n, 1000)));

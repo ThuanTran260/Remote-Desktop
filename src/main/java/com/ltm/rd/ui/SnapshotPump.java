@@ -14,6 +14,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * reader simply sees the newest value.
  */
 public final class SnapshotPump implements AutoCloseable {
+    private static final System.Logger LOG = System.getLogger(SnapshotPump.class.getName());
+
     private final Controller controller;
     private final AtomicReference<Snapshot> latest = new AtomicReference<>();
     private final AtomicLong polls = new AtomicLong();
@@ -37,10 +39,19 @@ public final class SnapshotPump implements AutoCloseable {
         this.executor = null;
     }
 
+    /**
+     * One poll. A RuntimeException from the controller is logged by class name only and swallowed:
+     * an exception that escapes a task of a ScheduledExecutorService suppresses every later run, which
+     * would freeze the UI on its last snapshot for good.
+     */
     void pollOnce() {
-        Snapshot s = controller.snapshot();
-        latest.set(s);
-        polls.incrementAndGet();
+        try {
+            Snapshot s = controller.snapshot();
+            latest.set(s);
+            polls.incrementAndGet();
+        } catch (RuntimeException e) {
+            LOG.log(System.Logger.Level.WARNING, "snapshot poll failed: " + e.getClass().getSimpleName());
+        }
     }
 
     /** The newest snapshot, or null before the first poll finished. Lock-free. */
