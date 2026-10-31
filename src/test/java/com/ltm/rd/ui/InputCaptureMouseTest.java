@@ -3,6 +3,7 @@ package com.ltm.rd.ui;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.ltm.rd.LaunchOptions;
+import java.awt.event.FocusEvent;
 import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
@@ -245,6 +246,35 @@ class InputCaptureMouseTest {
         assertEquals(List.of(), f.sink.described());
         f.move(500, 200);
         assertEquals(1, f.sink.described().size());
+    }
+
+    /**
+     * Product decision, pinned: the remote pointer keeps following the local one after the control window
+     * lost focus. Only the gate (and a swallowed button) applies to motion; buttons, wheel and keys stay
+     * blocked by the focus check and by acceptingInput.
+     */
+    @Test
+    void mouseMoveStillSendsAfterFocusLossButPressDoesNot() throws Exception {
+        Fixture f = new Fixture();
+        f.focus = false;
+        edt(() -> f.capture.focusLost(new FocusEvent(f.panel, FocusEvent.FOCUS_LOST)));
+        assertFalse(edt(() -> f.capture.acceptingInput()), "precondition: the focus loss stopped accepting input");
+        assertTrue(edt(() -> f.panel.inputGate().isPresent()), "precondition: the painted panel is gated open");
+
+        f.move(480, 270);
+        assertEquals(List.of("move 960,540"), f.sink.described(), "mouse move is exempt from the focus check");
+        f.press(480, 270, B1);
+        assertEquals(List.of("move 960,540"), f.sink.described(), "a press without focus sends nothing");
+        f.release(480, 270, B1);
+
+        // the window owns the focus again but acceptingInput is still false (focusGained has not arrived)
+        f.focus = true;
+        f.move(500, 280);
+        assertEquals(List.of("move 960,540", "move 1000,560"), f.sink.described(), "move is not gated by acceptingInput");
+        f.press(500, 280, B1);
+        assertEquals(List.of("move 960,540", "move 1000,560"), f.sink.described(),
+                "a press while acceptingInput is false sends nothing");
+        assertEquals(0, f.held());
     }
 
     @Test

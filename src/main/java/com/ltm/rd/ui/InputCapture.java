@@ -90,7 +90,11 @@ public final class InputCapture
         return wheelAcc;
     }
 
-    /** Whether new events are accepted: false from a focus loss until the focus is back. */
+    /**
+     * Whether new button, wheel and key events are accepted: false from a focus loss until the focus is
+     * back. Mouse move and drag events are deliberately not covered: they keep moving the remote pointer
+     * after a focus loss (see {@link #mouseMoved}).
+     */
     public boolean acceptingInput() {
         Edt.requireEdt();
         return acceptingInput;
@@ -156,6 +160,9 @@ public final class InputCapture
 
     private void moved(MouseEvent e) {
         Edt.requireEdt();
+        // Deliberately no focusOwner / acceptingInput check here: mouse move keeps moving the remote pointer
+        // even when the control window has lost focus (product decision). Only the gate and a swallowed
+        // button apply; buttons, wheel and keys stay blocked by focus and acceptingInput.
         Set<Integer> down = buttonsDown(e.getModifiersEx());
         if (!down.isEmpty() && swallowed.containsAll(down)) return;
         Optional<RemotePanel.InputGate> gate = panel.inputGate();
