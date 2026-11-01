@@ -82,6 +82,7 @@ public final class ServerCore implements AutoCloseable {
     private volatile ServerSocket cmdSocket;
     private volatile ServerSocket imgSocket;
     private volatile Ticker ticker;
+    private volatile Ticker.Registration pendingRegistration;
     private volatile ScheduledExecutorService scheduler;
     private volatile ExecutorService cleanup;
     private volatile ThreadPoolExecutor pool;
@@ -148,7 +149,7 @@ public final class ServerCore implements AutoCloseable {
         cleanup = Executors.newCachedThreadPool(factory("rd-cleanup-", true));
         Ticker t = new Ticker(timeouts.tick(), clock);
         ticker = t;
-        if (!seams.pendingTickDisabled()) t.register(pending);
+        if (!seams.pendingTickDisabled()) pendingRegistration = t.register(pending);
         pool = new ThreadPoolExecutor(POOL_THREADS, POOL_THREADS, 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(POOL_QUEUE), factory("rd-handshake-", true), rejectionHandler());
         acceptCmd = startAcceptor("rd-accept-cmd", cmd, HandshakeHandler.Kind.COMMAND);
@@ -304,6 +305,8 @@ public final class ServerCore implements AutoCloseable {
             awaitQuietly(() -> session.lifecycle().terminated().get(remainingMs(deadline, 3000), TimeUnit.MILLISECONDS));
         }
         pending.closeAll();
+        Ticker.Registration registration = pendingRegistration;
+        if (registration != null) registration.close();
         Ticker t = ticker;
         if (t != null) t.close();
         ExecutorService c = cleanup;

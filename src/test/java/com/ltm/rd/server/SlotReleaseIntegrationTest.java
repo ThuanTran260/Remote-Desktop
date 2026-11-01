@@ -122,7 +122,7 @@ class SlotReleaseIntegrationTest {
     }
 
     private ServerCore core(UnaryOperator<CompletableFuture<Void>> inputRelease) throws IOException {
-        return core(new ServerCore.Seams(null, null, null, true, null, null, inputRelease));
+        return core(new ServerCore.Seams(null, null, null, false, null, null, inputRelease));
     }
 
     private static void awaitTrue(BooleanSupplier condition, String what) {
@@ -240,7 +240,7 @@ class SlotReleaseIntegrationTest {
 
     @RepeatedTest(20)
     void slotHeldUntilWorkersStop() throws Exception {
-        ServerCore core = core(new ServerCore.Seams(null, null, null, true));
+        ServerCore core = core(new ServerCore.Seams(null, null, null, false));
         RawPeer client = auth(core, Packet.AuthStatus.OK);
         ServerSession session = core.sessions().current().orElseThrow();
         String code = core.sessions().currentCode();

@@ -86,6 +86,7 @@ class ServerCoreCloseRaceTest {
             thrown = e;
         }
         if (closeOnOtherThread) closer.join(TimeUnit.SECONDS.toMillis(WAIT_S));
+        assertEquals(0, core.tickerRegistrations(), "late resource cleanup releases the pending sweep");
 
         // every thread that start() created (rd-ticker, rd-accept-*, and rd-close-timer / rd-cleanup-* /
         // rd-handshake-* if they were ever started) is gone
