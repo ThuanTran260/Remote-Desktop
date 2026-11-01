@@ -1,6 +1,6 @@
 # Nghiệm thu C0 và A1–B0
 
-Ngày 2026-11-01. Phạm vi: G0 → C0 → A1 → A2 → A3 → A4 → B0. Tất cả gate từng task đã đạt; review toàn đợt đang chờ kết luận. Code cuối: `84a4682a93fae5f41320e549e252bfd3a872d57e`, branch `feat/wave3-4-desktop-v1`. Chưa push/merge.
+Cập nhật ngày 2026-11-02. Phạm vi: G0 → C0 → A1 → A2 → A3 → A4 → B0. Tất cả gate từng task và review toàn đợt đã đạt **PASS / APPROVED**, không có finding trong phạm vi thực thi. Code cuối: `84a4682a93fae5f41320e549e252bfd3a872d57e`, branch `feat/wave3-4-desktop-v1`. Chưa push/merge.
 
 ## Kết quả và bằng chứng độc lập
 
@@ -33,7 +33,7 @@ JaCoCo CLASS/BRANCH/COVEREDRATIO ≥0.80 và Enforcer đều đạt. B0 có ba c
 
 ## Provider và cách điều phối
 
-Run Orca: `run_c4af214b4a8d`. Sau chỉ dẫn mới của người dùng, mọi worker/reviewer mới dùng **Codex `gpt-6.1-sol`**, receipt `launch.effective` đã kiểm. G0/C0 đã giao Claude trước chỉ dẫn; review C0 và các dispatch sau đó đều là Codex.
+Run Orca: `run_c4af214b4a8d`. Theo chỉ dẫn mới nhất, thực thi dùng **Codex `gpt-6.1-sol`**, effort theo độ khó; review cuối được phép dùng `gpt-6-astra`. Không chuyển sang Luna/model rẻ hơn hoặc giao thêm Claude. G0/C0 đã giao Claude trước chỉ dẫn Codex; review C0 và các dispatch sau đó đều là Codex. Receipt `launch.effective` đã kiểm ghi model/effort lúc launch; audit riêng ghi rõ giới hạn của bằng chứng về model từng turn.
 
 | Việc | Effort implementer / reviewer |
 | --- | --- |
@@ -41,8 +41,21 @@ Run Orca: `run_c4af214b4a8d`. Sau chỉ dẫn mới của người dùng, mọi 
 | A3 | high / high |
 | A4 | high / medium |
 | Review toàn đợt | — / xhigh |
+| Audit nguồn gốc model | high / coordinator kiểm bằng chứng |
 
-Một editor và một chủ sở hữu Maven/target tại mỗi thời điểm. Review chỉ đọc và coordinator verify chạy song song sau commit. Không tạo worker con; không dùng collaboration agent thay Orca. Các terminal người dùng đã tiếp quản được giữ nguyên; các worker đã settle còn lại được release theo receipt.
+Một editor của source/index/HEAD và một chủ sở hữu Maven/target tại mỗi thời điểm. Review chỉ đọc và coordinator verify chạy song song sau commit. Theo chỉ dẫn song song mới nhất, audit nguồn gốc model chỉ đọc được giao riêng, ghi báo cáo khác với reviewer chức năng; coordinator hoàn tất tài liệu sau khi review chức năng settle. Không tạo worker con; không dùng collaboration agent thay Orca. Các terminal người dùng đã tiếp quản được giữ nguyên; các worker đã settle còn lại được release theo receipt.
+
+## Review toàn đợt
+
+[Review cuối](../reviews/2026-11-02-host-viewer-a1-b0-final-review.md) xét range `30d1604..d64b4d2` bằng **Sol xhigh** trong cùng Task/Dispatch, tiếp tục sau reset quota. Kết luận: spec PASS, chất lượng APPROVED; **0 Critical, 0 Important, 0 Minor trong range**. Reviewer kiểm SideTx/khóa/thứ tự callback, begin/end input, PacketRules, cơ học package, ba future trả slot và các ngoại lệ test cũ. Reviewer không chạy thêm test trên code đã được coordinator verify; không có fix wave vì không có finding trong phạm vi thực thi.
+
+Đây là nghiệm thu checkpoint trên wire v1. Review yêu cầu xử lý riêng pending ticker registration ở cấu hình mặc định trước khi chứng nhận merge v2; chưa chứng nhận B1/B2, giao diện đổi vai hoặc kiểm thử hai máy.
+
+## Kiểm tra phần được cho là do Luna tạo
+
+[Audit nguồn gốc model](2026-11-02-host-viewer-model-provenance.md) do worker Sol high thực hiện độc lập: bảy commit C0/VF0/A1–B0 được nối với đúng Dispatch; 17 bản tóm tắt launch khớp receipt gốc. A1–A4/B0 ghi Sol; C0 ghi Sonnet trước chỉ dẫn Codex; VF0 dùng lại process V0 đã launch Sol. Không xác định được diff nào do Luna tạo. Bằng chứng Luna cụ thể là menu đề nghị chuyển model của reviewer cuối, không phải receipt chuyển thành công hoặc sửa source.
+
+Giới hạn: receipt launch và model trong projection không chứng minh model của từng turn sửa code; transcript hiện có bị giới hạn/cắt nội dung. Vì vậy không khẳng định tuyệt đối “chưa từng có turn Luna”. Kiểm tra Git độc lập xác nhận HEAD/index/working tree của `src` và `pom.xml` đều bằng B0, không có source mới chưa theo dõi. Chất lượng code được xét qua review toàn diff và kết quả verify, không suy từ tên model.
 
 ## Những điểm đã chốt khi thực thi
 
@@ -58,9 +71,9 @@ Một editor và một chủ sở hữu Maven/target tại mỗi thời điểm.
 
 **Vẫn là wire v1.** Chưa lật Host/Viewer trong AppRuntime/UI, chưa có bằng chứng v2. B1/B2 chờ Phần 3 UI/CLI và Phần 4 tài liệu/H2. `viewer.ControlView → server.ServerPhase` còn tạm đến B1. PIT, 500 vòng race và H2 hai máy vẫn là gate trước merge, chưa chạy trong đợt này.
 
-**PENDING_TICKER_REGISTRATION, có từ baseline:** ServerCore đăng ký pending tickable nhưng không giữ handle gỡ; Ticker.close dừng executor nhưng để tickables trong list. Core mặc định có thể còn báo một registration sau shutdown. Fixture B0 tắt pending ticker, vẫn đăng ký/gỡ ticker của phiên và kiểm thread/port; nó chứng minh cleanup phiên, không chứng minh bộ đếm core mặc định về 0. Đây chưa phải bằng chứng ticker thread còn chạy hay socket chưa đóng. Follow-up nên sở hữu/gỡ pending Registration hoặc định nghĩa cleanup của Ticker.close, kèm regression test cấu hình mặc định.
+**PENDING_TICKER_REGISTRATION, có từ baseline:** ServerCore đăng ký pending tickable nhưng không giữ handle gỡ; Ticker.close dừng executor nhưng để tickables trong list. Core mặc định có thể còn báo một registration sau shutdown. Fixture B0 tắt pending ticker, vẫn đăng ký/gỡ ticker của phiên và kiểm thread/port; nó chứng minh cleanup phiên, không chứng minh bộ đếm core mặc định về 0. Đây chưa phải bằng chứng ticker thread còn chạy hay socket chưa đóng. Review cuối xếp đây là Minor kế thừa, không chặn checkpoint; **bắt buộc follow-up trước chứng nhận merge v2**: sở hữu/gỡ pending Registration hoặc định nghĩa cleanup tương đương của Ticker.close, kèm regression test cấu hình mặc định về registration/thread/port.
 
-Bằng chứng thô gồm ledger, launch/release receipts, báo cáo worker/reviewer, log verify và CSV JaCoCo thuộc workspace SDD của Run. Khi hoàn tất review cuối, coordinator lưu chúng vào `.superpowers/evidence/run_c4af214b4a8d/` trước khi dọn workspace tạm. Lịch sử commit và báo cáo này là bản ghi trong Git.
+Bằng chứng thô gồm ledger, launch/release receipts, báo cáo worker/reviewer, log verify và CSV JaCoCo đã được sao lưu local vào `.superpowers/evidence/run_c4af214b4a8d/`, được bỏ qua bằng `.git/info/exclude` riêng của checkout. Khi dọn workspace SDD tạm, coordinator đối chiếu toàn bộ tên file và SHA-256 với bản lưu; các đường dẫn artifact lịch sử trong báo cáo review/audit tra tại thư mục này. Lịch sử commit, báo cáo nghiệm thu, review cuối và audit nguồn gốc là bản ghi trong Git. Run không còn Dispatch active hay terminal reclaimable; bốn terminal người dùng tiếp quản được giữ, mười bốn terminal đã release.
 
 ## Coordinator rulings (exhaustive ledger extract)
 
@@ -86,3 +99,4 @@ Ordered ledger entries; later user instructions supersede historical routing.
 - Ruling: GoldenWireTraceTest has no awaitTrue despite brief wording; inspected it and FrameReceiverIntegrationTest. Add the same local bounded BooleanSupplier/LockSupport helper using unchanged WAIT_S; replace only three immediate slot-empty assertions, preserve every golden literal/other assertion. Explicitly enumerate helper and method names in commit/report. No artificial race rerun needed. Replied B0 msg_3b90274665a0; both same-delivery heartbeats IDs validated.
 - Ruling: final broad review uses execution baseline 30d160450105f1fd1f0be77e75c081bb4b1061f0 through final accepted implementation SHA, per roadmap checkpoint's fixed baseline. Earlier v1/A0 branch history is context only for concrete risks, not a new review target. Cost: preexisting out-of-scope defects are not certified by this review.
 - Ruling: coordinator may update execution status/provider routing and create the final acceptance report in a separate docs-only commit after B0 gates, despite task-worker docs prohibition. This is concrete handover metadata, not a production/task fix; source/test/pom must remain identical to accepted B0. Cost if wrong: documentation wording needs a follow-up, without changing verified code. Final broad review includes that docs commit.
+- Ruling: accept the final review's PENDING_TICKER_REGISTRATION classification as inherited Minor and nonblocking for C0+A1-B0, while explicitly making its default-config regression/ownership fix a prerequisite for later v2 merge certification — base blobs and shutdown semantics show it predates this scope; no in-range fix wave is warranted — cost if wrong: normal-config cleanup debt persists until the follow-up, so v2 merge readiness remains false.

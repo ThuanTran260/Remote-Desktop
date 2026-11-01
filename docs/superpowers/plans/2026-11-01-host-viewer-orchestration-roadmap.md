@@ -4,7 +4,7 @@
 
 **Goal:** Đóng hai điểm review trước A1, rồi triển khai năm task A1–B0 bằng worker độc lập, kiểm thử và review trước task kế tiếp. Chưa triển khai B1–B2.
 
-**Architecture:** Một coordinator, một checkout hiện có, tối đa một worker sửa file tại một thời điểm. Reviewer chỉ đọc SHA đã commit; coordinator giữ quyền chạy Maven trong lượt nghiệm thu. Các task chia sẻ session/port/test nên không fan-out code.
+**Architecture:** Một coordinator, một checkout hiện có, tối đa một worker sửa source/index/HEAD tại một thời điểm. Reviewer chỉ đọc SHA đã commit; coordinator giữ quyền chạy Maven trong lượt nghiệm thu. Các task chia sẻ session/port/test nên không fan-out code. Worker kiểm tra dữ liệu độc lập được chạy song song khi chỉ đọc và sở hữu các file báo cáo riêng.
 
 **Tech Stack:** Java 21 target, Maven wrapper, JUnit 5, JaCoCo 0.8.16; Orca local runtime 1.4.244 và Claude Code 2.1.316 đã được đọc trực tiếp ngày 2026-11-01.
 
@@ -47,7 +47,7 @@ G0 cập nhật plan/spec cho đúng ngoại lệ C0 và chữ ký mới, không
 
 ## Định tuyến model và effort ban đầu (lịch sử)
 
-Bảng dưới là định tuyến Sonnet ban đầu, trước chỉ dẫn mới nhất của người dùng. **Chỉ dẫn hiện hành: mọi worker/reviewer mới dùng Codex `gpt-6.1-sol`, không giao thêm Claude.** A1/A2/B0: xhigh/xhigh; A3: high/high; A4: high/medium; review toàn đợt: xhigh. G0/C0 đã được giao trước chỉ dẫn; C0 review và mọi dispatch sau đó đều là Codex. Receipt `launch.effective` đã được kiểm cho từng dispatch mới; không đổi global config.
+Bảng dưới là định tuyến Sonnet ban đầu, trước chỉ dẫn mới nhất của người dùng. **Chỉ dẫn hiện hành: thực thi dùng Codex `gpt-6.1-sol`, effort theo độ khó; review cuối có thể dùng `gpt-6-astra`. Không dùng Luna/model rẻ hơn hoặc giao thêm Claude.** A1/A2/B0: xhigh/xhigh; A3: high/high; A4: high/medium. Review toàn đợt đã hoàn tất bằng Sol xhigh trong cùng Dispatch sau reset quota; audit nguồn gốc model chạy bằng Sol high. G0/C0 đã được giao trước chỉ dẫn; C0 review và mọi dispatch sau đó đều là Codex. Receipt `launch.effective` đã được kiểm cho từng dispatch mới; không đổi global config.
 
 | Task | Worker thực hiện | Reviewer độc lập | Lý do |
 | --- | --- | --- | --- |
@@ -120,22 +120,23 @@ Executable đã resolve cho phiên khảo sát: `C:/Users/Admin/AppData/Local/Pr
 - [ ] Finding Critical/High chặn stage; Medium thuộc ownership, lifetime, release, wire hay assertion cũng chặn. Medium khác phải có quyết định xử lý cụ thể; không tự bỏ qua chỉ vì dưới High.
 - [ ] Trước kết thúc Run, mọi Dispatch phải settled và không còn terminal reclaimable chưa release/retained đúng yêu cầu. Không dùng terminal close thay cho worker-release. Lỗi launch/release phải đọc đúng recovery receipt/reference, không khởi chạy trùng.
 
-**Song song được phép:** reviewer đọc commit đã cố định và coordinator nghiệm thu, với quyền ghi target chỉ thuộc coordinator. **Không song song:** hai editor, hai Maven, reviewer đọc working tree đang bị sửa, hoặc worker con triển khai task kế tiếp trước gate.
+**Song song được phép:** reviewer đọc commit đã cố định và coordinator nghiệm thu, với quyền ghi target chỉ thuộc coordinator; các kiểm tra độc lập chỉ đọc với báo cáo riêng (ví dụ review chức năng và audit nguồn gốc model). Theo chỉ dẫn người dùng ngày 2026-11-02, coordinator chủ động giao thêm worker khi phạm vi và quyền ghi không chồng nhau. **Không song song:** hai editor dùng chung source/index, hai Maven dùng chung target, reviewer đọc working tree đang bị sửa, hoặc worker con triển khai task kế tiếp trước gate.
 
 ## Checkpoint sau B0 và phần việc tiếp theo
 
-- [ ] Review toàn diff từ baseline đã chốt; đọc cả source lẫn các thay đổi test/trace/coverage.
-- [ ] Đủ bằng chứng năm lớp mục tiêu ≥ 0.80; các test slot có latch 20 lượt đạt; không còn rò thread/port/ticker trong cleanup.
-- [ ] Báo rõ vẫn là v1, ControlView còn dùng ServerPhase tạm thời, chưa phải v2 đã chạy.
+- [x] Review toàn diff `30d1604..d64b4d2`: PASS / APPROVED; không có finding trong phạm vi C0–A1–B0.
+- [x] Đủ bằng chứng năm lớp mục tiêu ≥ 0.80; ba test slot có latch đều đạt 20 lượt; cleanup phiên, thread và port đạt trong fixture B0.
+- [ ] Trước chứng nhận merge v2: xử lý pending ticker registration ở cấu hình mặc định và thêm regression test cleanup cấu hình đó. Đây là tồn tại từ baseline; fixture B0 tắt pending ticker không chứng minh bộ đếm core mặc định về 0.
+- [x] Báo rõ vẫn là v1, ControlView còn dùng ServerPhase tạm thời, chưa phải v2 đã chạy.
 - [ ] Trình bày/chốt Phần 3 UI/CLI và Phần 4 tài liệu/H2, rồi viết plan riêng B1/B2. Effort đề xuất theo provider hiện hành: B1 Codex xhigh + reviewer xhigh; B2 Codex high + reviewer medium. Giai đoạn này chưa bắt đầu.
 - [ ] Sau B2 mới chạy PIT trên SHA code/test cuối và 500 vòng race; H2 chạy trên hai máy theo spec. Xử lý finding trước merge. Không lấy kết quả A0 hoặc A1–B0 thay bằng chứng cho v2.
 
 ## Tình trạng hiện tại
 
-**G0, C0 và A1–B0 đã hoàn tất**, mỗi task có review và verify. SHA code cuối `84a4682a93fae5f41320e549e252bfd3a872d57e`: coordinator `clean verify` đạt **910 test, 0 failures/errors/skipped**, cả năm gate ≥0.80; ba ca latch B0 đều đạt 20 lượt. Review toàn đợt đang chờ kết luận. [Báo cáo nghiệm thu, ngoại lệ và bằng chứng](../reports/2026-11-01-host-viewer-a1-b0-execution.md).
+**G0, C0 và A1–B0 đã hoàn tất**, mỗi task có review và verify. SHA code cuối `84a4682a93fae5f41320e549e252bfd3a872d57e`: coordinator `clean verify` đạt **910 test, 0 failures/errors/skipped**, cả năm gate ≥0.80; ba ca latch B0 đều đạt 20 lượt. Review toàn đợt **PASS / APPROVED**, không có finding trong phạm vi thực thi. [Báo cáo nghiệm thu, ngoại lệ và bằng chứng](../reports/2026-11-01-host-viewer-a1-b0-execution.md); [review cuối](../reviews/2026-11-02-host-viewer-a1-b0-final-review.md).
 
 **Vẫn là wire v1.** B1/B2, Phần 3–4, PIT/500 vòng race/H2 chưa được chứng nhận. Phụ thuộc `viewer.ControlView → server.ServerPhase` còn tạm đến B1. Không push/merge/rebase/amend.
 
-Cleanup B0 chứng minh session registrations về 0 trong fixture tắt pending ticker, đồng thời kiểm thread và port. Core mặc định có giới hạn bộ đếm pending registration tồn tại từ baseline: `Ticker.close` dừng executor nhưng không xóa tickables. Cần follow-up riêng; không diễn giải test này thành đã chứng minh bộ đếm core mặc định về 0.
+Cleanup B0 chứng minh session registrations về 0 trong fixture tắt pending ticker, đồng thời kiểm thread và port. Core mặc định có giới hạn bộ đếm pending registration tồn tại từ baseline: `Ticker.close` dừng executor nhưng không xóa tickables. Review cuối xếp đây là Minor kế thừa, không chặn checkpoint hiện tại; follow-up riêng là điều kiện trước chứng nhận merge v2. Không diễn giải test này thành đã chứng minh bộ đếm core mặc định về 0.
 
 Các mục "Bằng chứng baseline đã kiểm" và "Review Focus và kết luận tại 30d1604" là **bằng chứng lịch sử** tại `30d1604`, không thay thế nghiệm thu SHA cuối. Checkbox cũ là checklist thiết kế; trạng thái thực thi có thẩm quyền nằm trong báo cáo nghiệm thu và ledger của Run `run_c4af214b4a8d`.
