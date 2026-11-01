@@ -31,8 +31,10 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -171,9 +173,13 @@ class ServerSessionProtocolEdgesTest {
     }
 
     private ServerSession newSession() {
+        return newSession(clock);
+    }
+
+    private ServerSession newSession(LongSupplier sessionClock) {
         SessionLifecycle<ServerPhase> lifecycle = new SessionLifecycle<>(ServerPhase.RESERVED, ServerPhase.CLOSING,
                 System::nanoTime, Duration.ofMillis(50), scheduler, cleanup);
-        ServerSession.Env env = new ServerSession.Env(TIMEOUTS, clock, null, () -> false, null, false);
+        ServerSession.Env env = new ServerSession.Env(TIMEOUTS, sessionClock, null, () -> false, null, false);
         ServerSession session = new ServerSession(1, TOKEN, InetAddress.getLoopbackAddress(), 0, lifecycle, env);
         sessions.add(session);
         return session;
@@ -231,6 +237,36 @@ class ServerSessionProtocolEdgesTest {
 
     private static CloseInfo closeInfo(ServerSession session) {
         return session.closeInfo().orElseThrow();
+    }
+
+    private static void awaitLatch(CountDownLatch latch, String what) {
+        try {
+            assertTrue(latch.await(WAIT_S, TimeUnit.SECONDS), what);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            fail(what + " (interrupted)");
+        }
+    }
+
+    /**
+     * The reserve window was over when activation was decided: the session is not ACTIVE, and the tick
+     * closes it as it always did, with TIMEOUT "attach timeout". The wire shows the PONG that proves
+     * the writer is running, then DISCONNECT: SESSION_ACTIVE was never queued.
+     */
+    private void assertStaysReservedUntilTheAttachTimeout(ServerSession session, Sink sink, long tickAt)
+            throws Exception {
+        assertEquals(ServerPhase.RESERVED, session.phase());
+        assertTrue(session.activeAtNanos().isEmpty());
+        session.dispatch(Packet.ping(1)); // the writer must be running, or the short close grace could skip DISCONNECT
+        assertEquals(List.of(PacketType.PONG), awaitWritten(sink, 1));
+
+        session.tick(tickAt);
+
+        CloseInfo info = closeInfo(session);
+        assertEquals(Packet.DisconnectReason.TIMEOUT, info.reason());
+        assertEquals("attach timeout", info.message());
+        assertTrue(info.sendDisconnect());
+        assertEquals(List.of(PacketType.PONG, PacketType.DISCONNECT), awaitWritten(sink, 2));
     }
 
     // ---- command channel hand-over ---------------------------------------------------------
@@ -357,6 +393,114 @@ class ServerSessionProtocolEdgesTest {
         session.tick(s(5)); // the ticker then closes it for what it is
         assertEquals("attach timeout", closeInfo(session).message());
         assertEquals(Packet.DisconnectReason.TIMEOUT, closeInfo(session).reason());
+    }
+
+    /**
+     * SCREEN_INFO's dispatcher has already read its packet timestamp (inside the reserve window) and
+     * waits for the session lock; the window ends while another thread holds the lock. Activation must
+     * be decided on the time read under the lock, not on the stale packet timestamp.
+     */
+    @Test
+    void screenInfoWaitingForSessionLockCannotActivateAfterReserveDeadline() throws Exception {
+        String dispatcherName = "test-dispatch-waiting-for-lock";
+        CountDownLatch packetTimestampRead = new CountDownLatch(1);
+        LongSupplier observedClock = () -> {
+            long now = clock.getAsLong();
+            if (Thread.currentThread().getName().equals(dispatcherName)) packetTimestampRead.countDown();
+            return now;
+        };
+        Sink sink = new Sink(null);
+        ServerSession session = newSession(observedClock);
+        PendingConnection pc = new PendingConnection(new Socket(), 0);
+        assertTrue(session.attachCommandChannel(pc, cmdChannel(pc, sink), 0));
+        attachImage(session, 0); // only SCREEN_INFO is missing
+        ExecutorService dispatcher = Executors.newSingleThreadExecutor(r -> new Thread(r, dispatcherName));
+        try {
+            Future<?> dispatched = session.lifecycle().atomically(tx -> {
+                Future<?> f = dispatcher.submit(() -> session.dispatch(Packet.screenInfo(1920, 1080)));
+                awaitLatch(packetTimestampRead, "the dispatcher never read its packet timestamp");
+                clock.set(s(6)); // past reservedAt 0 + reserve 5 s, while the dispatcher still holds the old value
+                return f;
+            }); // the lock is released here
+            dispatched.get(WAIT_S, TimeUnit.SECONDS);
+        } finally {
+            dispatcher.shutdownNow();
+        }
+
+        assertEquals(new Packet.SizePayload(1920, 1080), session.screen().orElseThrow(), "the size is still stored");
+        assertStaysReservedUntilTheAttachTimeout(session, sink, s(6));
+    }
+
+    @Test
+    void screenInfoOneNanosecondBeforeTheReserveDeadlineActivatesAtThatInstant() throws Exception {
+        Sink sink = new Sink(null);
+        ServerSession session = reserved(sink);
+        attachImage(session, 0);
+
+        clock.set(s(5) - 1); // reservedAt 0 + reserve 5 s, minus one nanosecond
+        session.dispatch(Packet.screenInfo(1920, 1080));
+
+        assertEquals(ServerPhase.ACTIVE, session.phase());
+        assertEquals(s(5) - 1, session.activeAtNanos().orElseThrow());
+        assertEquals(List.of(PacketType.SESSION_ACTIVE), awaitWritten(sink, 1));
+    }
+
+    @Test
+    void imageAttachCarryingAStaleTimestampCannotActivateAtTheReserveDeadline() throws Exception {
+        Sink sink = new Sink(null);
+        ServerSession session = reserved(sink);
+        session.dispatch(Packet.screenInfo(1920, 1080));
+
+        clock.set(s(5)); // exactly reservedAt 0 + reserve 5 s: equality means expired
+        attachImage(session, 0); // admitted on the caller's timestamp from inside the window
+
+        assertStaysReservedUntilTheAttachTimeout(session, sink, s(5));
+    }
+
+    @Test
+    void commandChannelAttachCarryingAStaleTimestampCannotActivateAtTheReserveDeadline() throws Exception {
+        Sink sink = new Sink(null);
+        ServerSession session = newSession();
+        session.dispatch(Packet.screenInfo(1920, 1080)); // no writer yet: stored, nothing to activate
+        attachImage(session, 0);
+
+        clock.set(s(5)); // exactly reservedAt 0 + reserve 5 s: equality means expired
+        PendingConnection pc = new PendingConnection(new Socket(), 0);
+        assertTrue(session.attachCommandChannel(pc, cmdChannel(pc, sink), 0));
+
+        assertStaysReservedUntilTheAttachTimeout(session, sink, s(5));
+    }
+
+    @Test
+    void imageAttachActivatesAtTheClockReadInsideTheTransactionNotAtItsCallersTimestamp() throws Exception {
+        Sink sink = new Sink(null);
+        ServerSession session = reserved(sink);
+        clock.set(s(1));
+        session.dispatch(Packet.screenInfo(1920, 1080));
+
+        clock.set(s(2));
+        attachImage(session, s(1)); // the caller read s(1) before it waited for the lock
+
+        assertEquals(ServerPhase.ACTIVE, session.phase());
+        assertEquals(s(2), session.activeAtNanos().orElseThrow());
+        assertEquals(List.of(PacketType.SESSION_ACTIVE), awaitWritten(sink, 1));
+    }
+
+    @Test
+    void commandChannelAttachActivatesAtTheClockReadInsideTheTransactionNotAtItsCallersTimestamp() throws Exception {
+        Sink sink = new Sink(null);
+        ServerSession session = newSession();
+        clock.set(s(1));
+        session.dispatch(Packet.screenInfo(1920, 1080));
+        attachImage(session, s(1));
+
+        clock.set(s(2));
+        PendingConnection pc = new PendingConnection(new Socket(), s(1));
+        assertTrue(session.attachCommandChannel(pc, cmdChannel(pc, sink), s(1))); // read before waiting for the lock
+
+        assertEquals(ServerPhase.ACTIVE, session.phase());
+        assertEquals(s(2), session.activeAtNanos().orElseThrow());
+        assertEquals(List.of(PacketType.SESSION_ACTIVE), awaitWritten(sink, 1));
     }
 
     @Test

@@ -189,7 +189,7 @@ public final class ServerSession implements Tickable {
             tx.after(() -> w.start(lifecycle::startWorker));
             tx.after(() -> lifecycle.startWorker("rd-cmd-reader", () -> readLoop(ch)));
             tx.after(() -> registerTickables(hb, dog));
-            maybeActivate(tx, now);
+            maybeActivate(tx);
             return true;
         });
     }
@@ -257,7 +257,7 @@ public final class ServerSession implements Tickable {
             switch (p.type()) {
                 case SCREEN_INFO -> {
                     screen = p.sizePayload();
-                    maybeActivate(tx, now);
+                    maybeActivate(tx);
                 }
                 case PING -> {
                     if (writer != null && writer.offer(Packet.pong(p.seq())) == CommandWriter.OfferResult.OVERFLOW) {
@@ -298,7 +298,7 @@ public final class ServerSession implements Tickable {
             imageChannel = ch;
             tx.after(() -> setReadTimeout(ch, env.timeouts().imgSoTimeout()));
             lifecycle.addStopHook(ch::closeWrappersQuietly);
-            maybeActivate(tx, now);
+            maybeActivate(tx);
             return AttachResult.ATTACHED;
         });
     }
@@ -308,14 +308,17 @@ public final class ServerSession implements Tickable {
     /**
      * Inside a transaction: once SCREEN_INFO, the image channel and the command writer are all
      * there and the reserve window is still open, queue SESSION_ACTIVE and advance only if the
-     * writer accepted it.
+     * writer accepted it. The window is judged on the clock read here, under the lock, never on a
+     * timestamp the caller took before it waited for the lock.
      */
-    private void maybeActivate(SessionLifecycle.Tx<ServerPhase> tx, long now) {
+    private void maybeActivate(SessionLifecycle.Tx<ServerPhase> tx) {
         if (writer == null || screen == null || imageChannel == null) return;
-        if (tx.isClosed() || tx.phase() != ServerPhase.RESERVED || reserveExpired(now)) return;
+        if (tx.isClosed() || tx.phase() != ServerPhase.RESERVED) return;
+        long activationNanos = env.clock().getAsLong();
+        if (reserveExpired(activationNanos)) return;
         switch (writer.offer(Packet.sessionActive())) {
             case ACCEPTED -> {
-                if (tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE)) onActive(tx, now);
+                if (tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE)) onActive(tx, activationNanos);
             }
             case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
             default -> { } // CLOSED or COALESCED: the session is already going away
