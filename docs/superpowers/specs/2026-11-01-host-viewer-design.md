@@ -7,9 +7,10 @@ Ngày: 2026-11-01. Branch: `feat/wave3-4-desktop-v1`. Thay thế quy ước vai 
 | Phần | Nội dung | Trạng thái |
 | --- | --- | --- |
 | 1 | Hướng kết nối, bắt tay, deadline, hủy/mất kênh | Đã duyệt (2026-10-31) |
-| 2 | Tách package/lớp theo vai, trình tự commit, kiểm thử | **Đã duyệt để triển khai** (2026-11-01, người dùng chốt P2 sau review lần 4). Bắt đầu bằng A0; chưa có bằng chứng v2 |
-| 3 | Giao diện và CLI (tên cửa sổ, cờ dòng lệnh) | Chưa trình bày |
-| 4 | Tài liệu, lịch, nghiệm thu H2 | Chưa trình bày |
+| 2 | Tách package/lớp theo vai, trình tự commit, kiểm thử | **Đã duyệt để triển khai** (2026-11-01, người dùng chốt P2 sau review lần 4). A0 đã xong (`1b3eb94`); chưa có bằng chứng v2 |
+| 2′ | Lộ trình thực thi G0 → C0 → A1 → A2 → A3 → A4 → B0 → review toàn nhánh (roadmap `docs/superpowers/plans/2026-11-01-host-viewer-orchestration-roadmap.md`) | **Đã được người dùng duyệt thực thi** (yêu cầu thực thi mới nhất, 2026-11-01), gồm định tuyến model/effort. Chỉ G0 (tài liệu) đang chạy; C0–B0 chưa thực hiện; code/test v2 chưa tồn tại |
+| 3 | Giao diện và CLI (tên cửa sổ, cờ dòng lệnh) | Chưa trình bày; B1/B2 chưa được phép bắt đầu |
+| 4 | Tài liệu, lịch, nghiệm thu H2 | Chưa trình bày; B1/B2 chưa được phép bắt đầu |
 
 ## 0. Mục tiêu
 
@@ -217,6 +218,8 @@ Mỗi lớp chỉ chuyển package **đúng một lần**. Test của lớp nào
 
 Sau A4, vỏ v1 tạm thời trông lệch tên: `server.ServerSession` dùng `viewer.ControlSide`, còn `client.ClientSession` dùng `host.ControlledSide`. Điều này chấp nhận được, vì package lúc đó gọi theo **nửa vai trò** và B1 sẽ lật vỏ cho khớp.
 
+**Phụ thuộc ngược tạm thời:** `viewer.ControlView` giữ trường `server.ServerPhase phase` cho đến B1 (B1 đổi kiểu này). Vì vậy A4 **không** loại bỏ mọi phụ thuộc ngược `viewer → server` và không được báo như vậy; khoản nợ này phải được ghi trong commit body A4 và reviewer liệt kê mọi import ngược còn lại.
+
 ### 2.3 Hợp đồng giữa vỏ và nửa vai trò
 
 **`SessionPort`** là thứ vỏ cấp cho nửa vai trò. Nửa vai trò không thấy socket và không thấy lớp vỏ. Port bọc `SessionLifecycle`, `CommandWriter` và `Ticker` hiện có:
@@ -224,7 +227,8 @@ Sau A4, vỏ v1 tạm thời trông lệch tên: `server.ServerSession` dùng `v
 - `offer(Packet)` → `CommandWriter.OfferResult` (không chặn);
 - `register(Tickable)` → `Registration`, `addStopHook(Runnable)`;
 - `startWorker(name, Runnable) → boolean`: dùng đúng cơ chế đếm/skipping của lifecycle, worker được tính vào `terminated()`;
-- `tryActivate(stx)`: chạy `maybeActivate` của vỏ trong **chính tx đang mở**, không tự mở tx lồng nhau và không nhận timestamp do caller giữ từ trước. Vỏ đọc clock trong tx, kiểm closed/phase/deadline, rồi mới kiểm đủ điều kiện và kích hoạt tối đa một lần.
+- `tryActivate(stx)`: chạy `maybeActivate(tx)` của vỏ trong **chính tx đang mở**, không tự mở tx lồng nhau và không nhận timestamp do caller giữ từ trước. Port kiểm (1) `stx` là view do **chính port này** tạo (khác → `IllegalArgumentException`); (2) **ép kiểm lifetime của tx gốc** (hết hạn/sai thread → `IllegalStateException`) trước khi giao cho Shell, kể cả khi Shell không đụng tx. Vỏ đọc clock trong tx, kiểm closed/phase/deadline, rồi mới kiểm đủ điều kiện và kích hoạt tối đa một lần.
+- **Nguồn gốc `SideTx`:** chỉ `LifecyclePort.atomically` tạo `SideTx`, từ lifecycle của chính port; **không có `wrap(Tx)` hay API public nào** dựng `SideTx` từ `SessionLifecycle.Tx` có sẵn (nếu có, `portA.wrap(txB)` gắn nhãn A cho tx của B mà không có cách kiểm). Vỏ đang giữ tx gốc mà cần gọi hook hoặc `Heartbeat.answerPing` thì mở `port.atomically(stx -> …)` lồng: khóa re-entrant, và hàng `after` chỉ chạy khi tx ngoài cùng nhả khóa.
 
 **`SideTx`** là giao diện trung tính mà vỏ dựng từ `SessionLifecycle.Tx<Phase>` của nó. Nửa vai trò chỉ thấy `SideTx`, không thấy `Tx<ClientPhase>` hay `Tx<ServerPhase>`:
 - `isClosed()`;
@@ -234,7 +238,7 @@ Sau A4, vỏ v1 tạm thời trông lệch tên: `server.ServerSession` dùng `v
 - `close(CloseInfo)`, giữ nguyên lý do và thông điệp mà nửa vai trò đưa vào;
 - `after(Runnable)`.
 
-`SideTx` chỉ hợp lệ trong callback `atomically`/hook hiện tại, không được lưu trong field hay đưa vào worker. Worker luôn mở `port.atomically` mới. Vỏ phải kiểm `SideTx` thuộc đúng phiên/tx khi nhận `tryActivate`; nửa vai trò không tự nhìn thấy enum phase hay thay deadline.
+`SideTx` chỉ hợp lệ trong callback `atomically`/hook hiện tại, không được lưu trong field hay đưa vào worker. Worker luôn mở `port.atomically` mới. Port phải kiểm `SideTx` thuộc đúng port và tx gốc còn hợp lệ khi nhận `tryActivate` (xem trên; test `tryActivateRejectsSideTxOfAnotherPort`, `tryActivateWithExpiredSideTxThrows`); nửa vai trò không tự nhìn thấy enum phase hay thay deadline.
 
 **`SessionSide`** gồm 4 hook và 1 truy vấn do vỏ gọi:
 
@@ -246,7 +250,7 @@ Sau A4, vỏ v1 tạm thời trông lệch tên: `server.ServerSession` dùng `v
 | `onActive(stx, now, img) → boolean` | vỏ, đúng một lần khi đủ điều kiện ACTIVE. Vỏ Host chỉ `offer(SESSION_ACTIVE)` và `advance` **sau khi** hook trả `true` (1.3 bước 5) | trong tx | `beginSession(gen)`; nếu `false` thì trả `false` và vỏ đóng phiên với "input session refused"; gán bounds của phiên cho executor; `stx.after(start ScreenSender ghi img.out())` | `monitor.reset(now)`; `stx.after(start FrameReceiver đọc img.in())` |
 | `onClosing() → CompletableFuture<Void>` | lifecycle, đúng một lần khi phiên bắt đầu đóng | ngoài khóa | `endSession(gen)` nếu đã begin, nếu chưa thì trả future đã xong | future đã xong (`InputCapture` tự nhả ở EDT) |
 
-Vỏ nối kết quả future của `onClosing()` vào **future `inputReleased()` cố định** ở mục 1.8, không thay tham chiếu và không trả một future đã xong trước khi close hook chạy. `SessionManager` dùng `allOf(socketsClosed, terminated, inputReleased)` và chỉ trả slot nếu cả ba hoàn tất bình thường, phiên vẫn là `current` (so sánh identity/generation). Close hook phải chuyển cả lỗi đồng bộ lẫn lỗi future của `endSession` thành hoàn tất exceptionally; không được nuốt lỗi rồi báo nhả thành công.
+Vỏ nối kết quả future của `onClosing()` vào **future `inputReleased()` cố định** ở mục 1.8 (`SessionSide.bridgeClosing`), không thay tham chiếu và không trả một future đã xong trước khi close hook chạy. Seam kiểm thử `inputReleaseSeam` (B0) chỉ biến đổi **stage nguồn** (kết quả `onClosing()`) trước khi vào bridge; nó không thay thế hay hoàn tất target ổn định đó. `SessionManager` dùng `allOf(socketsClosed, terminated, inputReleased)` và chỉ trả slot nếu cả ba hoàn tất bình thường, phiên vẫn là `current` (so sánh identity/generation). Close hook phải chuyển cả lỗi đồng bộ lẫn lỗi future của `endSession` thành hoàn tất exceptionally; không được nuốt lỗi rồi báo nhả thành công.
 
 Hook `onActive` ở Host chỉ đặt `inputBegun`, công bố bounds và đăng ký callback qua `stx.after`; việc `offer(SESSION_ACTIVE)`/`advance` vẫn do vỏ làm trong cùng tx. Callback phải dùng `port.startWorker`, nên nếu `offer` lỗi hoặc close thắng thì không chạy sender. `readyForActive()` chỉ đọc trạng thái đã được bảo vệ bởi tx, không I/O hay gọi adapter. Vỏ Viewer còn phải giữ đủ hai cờ `activationReceived && imageChannelReady` trước khi gọi hook; `readyForActive()` của `ControlSide` không thay thế hai cờ thuộc vỏ này.
 
@@ -308,29 +312,35 @@ Mỗi commit đều phải xanh. Model và effort ghi theo quy ước worker.
    - Thêm luôn các golden trace ở 3.2. Lưới an toàn này phải có trước khi refactor.
 
    *(sonnet, xhigh: cần phủ nhánh race bằng seam tất định và dựng golden trace)*
-1. **A1** — tạo `SessionPort`/`SessionSide`/`SideTx`; tách `ControlSide` khỏi `ServerSession` (vẫn trong `server`); `FrameReceiver` chuyển sang phụ thuộc port + `ControlSide`. Không đổi wire hay hành vi. *(sonnet, xhigh)*
-2. **A2** — tách `ControlledSide` khỏi `ClientSession` (vẫn trong `client`).
+1. **C0** — sửa **thời điểm đọc clock của quyết định kích hoạt** trước mọi refactor (thay đổi hành vi có chủ đích, tách riêng khỏi A1).
+   - Chỉ đổi `ServerSession.maybeActivate` (private) thành `maybeActivate(SessionLifecycle.Tx<ServerPhase> tx)`: đọc `env.clock()` bên trong tx, dùng cùng giá trị cho reserve check và `onActive`; mọi callsite (SCREEN_INFO, attach kênh lệnh, attach kênh ảnh) dùng nó. Không đổi timestamp heartbeat, `tick`, ý nghĩa đóng timeout, wire hay lý do đóng.
+   - Lý do: v1 đọc `now` trước khi lấy khóa phiên (`ServerSession.java:244`), nên thread đợi khóa có thể kích hoạt sau `reservedAt + reserve` trong khi fake clock đã tiến.
+   - Test mới trong `ServerSessionProtocolEdgesTest`: `screenInfoWaitingForSessionLockCannotActivateAfterReserveDeadline` (phải **đỏ trên baseline trước khi sửa**) cùng các ca biên còn hạn / đúng deadline (`now == deadline` là hết hạn) cho các đường gọi. Golden trace literal và assertion không đổi.
+   - Sau C0, A1–A4 là refactor thuần so với baseline (SHA) của C0; A1 không đổi chính sách thời gian này. *(sonnet, xhigh; review xhigh)*
+2. **A1** — tạo `SessionPort`/`SessionSide`/`SideTx`; tách `ControlSide` khỏi `ServerSession` (vẫn trong `server`); `FrameReceiver` chuyển sang phụ thuộc port + `ControlSide`. Không đổi wire hay hành vi so với baseline C0. `Shell.tryActivate` của `ServerSession` gọi `maybeActivate(tx)` của C0. *(sonnet, xhigh; review xhigh)*
+3. **A2** — tách `ControlledSide` khỏi `ClientSession` (vẫn trong `client`).
    - `ScreenSender` chuyển sang phụ thuộc port + `ScreenGeometry`.
-   - `CommandReceiver.handle` chuyển sang nhận `SideTx`; nhánh `PING` lên vỏ (mục 2.3).
+   - `CommandReceiver.handle` chuyển sang nhận `SideTx`; nhánh `PING` lên vỏ (mục 2.3) và `Heartbeat.answerPing` được gọi qua `port.atomically`. Hai test PING chuyển sang `HeartbeatTest` giữ nguyên input/assertion, kèm bảng truy vết tên cũ → mới trong commit body.
+   - `inputReleased` giữ là future final tạo trong constructor (target ổn định); `SessionSide.bridgeClosing` không bao giờ thay hay hoàn tất sớm nó.
    - Không đổi wire, hành vi hay lý do đóng.
-   - Vẫn dùng source chuẩn bị trước connect của v1; chưa đưa `rd-host-prepare` vào luồng chạy. A0 chỉ đổi cấu hình build/thêm test; A1–B0 không được lén áp dụng bắt tay v2.
+   - Vẫn dùng source chuẩn bị trước connect của v1; chưa đưa `rd-host-prepare` vào luồng chạy. A0 chỉ đổi cấu hình build/thêm test; A1–B0 không được lén áp dụng bắt tay v2 (chuẩn bị adapter sau AUTH chỉ thuộc B1).
 
-   *(sonnet, xhigh)*
-3. **A3** — thêm `PacketRules` (mục 2.4) theo luật v1. *(sonnet, xhigh)*
-4. **A4** — chuyển hai nửa vai trò sang `viewer`/`host` theo bảng 2.2, không đổi logic. API ở ranh giới chuyển thành `public`. *(sonnet, high)*
-5. **B0** — `SessionManager` trả slot theo mục 1.8: chờ đủ `socketsClosed` + `terminated` + `inputReleased`.
+   *(sonnet, xhigh; review xhigh)*
+4. **A3** — thêm `PacketRules` (mục 2.4) theo luật v1. *(sonnet, high; review high)*
+5. **A4** — chuyển hai nửa vai trò sang `viewer`/`host` theo bảng 2.2, không đổi logic. API ở ranh giới chuyển thành `public`. `viewer.ControlView` giữ phụ thuộc tạm vào `server.ServerPhase` đến B1 (mục 2.2). *(sonnet, high; review medium)*
+6. **B0** — `SessionManager` trả slot theo mục 1.8: chờ đủ `socketsClosed` + `terminated` + `inputReleased`.
    - Wire vẫn v1. Ở v1, `ControlSide.onClosing()` trả future đã xong, nên thay đổi hành vi duy nhất là slot còn chờ thêm worker dừng hẳn.
-   - Có test với `SessionSide` giả giữ future bằng latch.
+   - Có test với `SessionSide` giả giữ future bằng latch. Seam `inputReleaseSeam` biến đổi stage đóng nguồn trước bridge; target `inputReleased` cố định tạo từ constructor không bị thay hay hoàn tất sớm.
 
-   *(sonnet, xhigh)*
-6. **B1** — đổi vai trong **một commit nguyên khối**:
+   *(sonnet, xhigh; review xhigh)*
+7. **B1** — đổi vai trong **một commit nguyên khối**:
    - vỏ lắng nghe dùng `host.ControlledSide`, vỏ kết nối dùng `viewer.ControlSide`;
    - `PacketRules` lật sang mục 1.7; bắt tay theo 1.3; socket theo 1.6; `VERSION = 2`;
    - `AppRuntime.forHost` sở hữu `InputExecutor` theo 1.8.
    - Chính bước này chuyển chuẩn bị adapter sang `rd-host-prepare`, áp dụng hai điều kiện kích hoạt và các hợp đồng future/offer/deadline ở 1.3, 1.8, 2.3. Đưa test seam `beforeSenderStart` sang phía Host; hook `afterAttachFlushed` ở phía Viewer, không chuyển cả hai theo tên `ClientHooks` cũ.
 
-   Không chia nhỏ được, vì chỉ đổi một phía thì test tích hợp hai phía sẽ đỏ. *(sonnet, xhigh)*
-7. **B2** — chuyển các lớp vỏ sang `host`/`viewer` và đổi tên theo bảng 2.2, không đổi logic. *(sonnet, high)*
+   Không chia nhỏ được, vì chỉ đổi một phía thì test tích hợp hai phía sẽ đỏ. **B1 và B2 hoãn**: chỉ có plan riêng và chỉ bắt đầu sau khi Phần 3 (UI/CLI) và Phần 4 (tài liệu/H2) được trình bày và duyệt; lộ trình thực thi hiện tại dừng ở review toàn nhánh sau B0. *(sonnet, xhigh; review xhigh)*
+8. **B2** — chuyển các lớp vỏ sang `host`/`viewer` và đổi tên theo bảng 2.2, không đổi logic. *(sonnet, high; review medium)*
 
 ## 3. Kiểm thử chặn lỗi (đã duyệt cùng Phần 2)
 
@@ -347,7 +357,7 @@ Mỗi commit đều phải xanh. Model và effort ghi theo quy ước worker.
 - **Xử lý PING/PONG:** heartbeat chạy từ lúc bàn giao, nên nếu ATTACH chậm hơn `pingInterval` thì PING có thể đứng trước `SESSION_ACTIVE`. Vì vậy:
   - Trace chính chạy bằng fake clock và `TestTimeouts` có `pingInterval` dài hơn thời gian của ca, nên không có PING/PONG.
   - Thêm một ca riêng "ATTACH chậm hơn `pingInterval`": PING/PONG được phép xen ở bất kỳ đâu **sau** bàn giao (kể cả trước `SESSION_ACTIVE`) nhưng không bao giờ trước `AUTH_RESULT`. Bỏ PING/PONG ra thì các gói còn lại phải đúng thứ tự của trace chính.
-- A1–B0 phải giữ các chuỗi này y hệt.
+- C0–B0 phải giữ các chuỗi này y hệt (literal và assertion không đổi, kể cả sau C0). C0 chỉ **thêm** test vào `ServerSessionProtocolEdgesTest` (race `screenInfoWaitingForSessionLockCannotActivateAfterReserveDeadline` phải đỏ trước fix, cùng các ca biên deadline); không sửa test cũ nào.
 - **A1–A4: quy tắc sửa test cũ.**
   - Được phép (chỉ là sửa cơ học):
     - đổi `package`/`import` và tên tham chiếu khi chuyển lớp;
@@ -464,7 +474,7 @@ Nguồn chính thức cho cấu hình: [Maven lifecycle và thứ tự goal](htt
 
 ### 3.8 Review và nghiệm thu tay
 
-- Mỗi task có review sonnet xhigh theo checklist: state machine, CAS ownership, close idempotent, deadline, thứ tự lock, quy tắc stream ở 1.3, hợp đồng hook ở 2.3, điều kiện trả slot ở 1.8. Finding Critical/High phải đóng trước task sau.
+- Mỗi task có review độc lập theo effort đã duyệt (C0/A1/A2/B0/B1 xhigh; A3 high; A4 và B2 medium) theo checklist: state machine, CAS ownership, close idempotent, deadline, thứ tự lock, quy tắc stream ở 1.3, hợp đồng hook ở 2.3, điều kiện trả slot ở 1.8. Finding Critical/High phải đóng trước task sau.
 - Cuối branch: review toàn branch (sonnet xhigh). Coordinator chạy verify, 500 vòng race và (nếu duyệt) PIT.
 - H2 do người dùng chạy trên 2 máy bằng v2. Ngoài các ca cũ, thêm:
   - gõ phím ngay sau khi kết nối;
@@ -485,6 +495,12 @@ Nguồn chính thức cho cấu hình: [Maven lifecycle và thứ tự goal](htt
 
 ## Lịch sử sửa
 
+- **2026-11-01, G0 (đính chính tài liệu trước C0; người dùng đã duyệt thực thi lộ trình; chưa sửa source/test/pom):**
+  1. Bỏ `LifecyclePort.wrap(Tx)` khỏi API sản xuất: chỉ `LifecyclePort.atomically` tạo `SideTx` từ lifecycle của chính port; vỏ đang giữ tx gốc dùng `port.atomically` lồng (mục 2.3). `tryActivate` kiểm view thuộc đúng port và ép kiểm lifetime tx gốc trước khi gọi Shell; thêm test `tryActivateWithExpiredSideTxThrows`.
+  2. Thêm C0 (mục 2.5) trước A1: `maybeActivate(tx)` đọc clock trong tx; A1–A4 là refactor thuần so với baseline C0.
+  3. Giữ chuẩn bị adapter v1 (trước connect) suốt C0–B0; `rd-host-prepare` chỉ B1. `viewer.ControlView → server.ServerPhase` tạm thời đến B1. B1/B2 hoãn đến khi Phần 3–4 được duyệt.
+  4. B0: `inputReleaseSeam` biến đổi stage nguồn của bridge, không thay target `inputReleased` cố định.
+  5. Model/effort theo định tuyến người dùng chấp nhận: G0 high; C0/A1/A2/B0 xhigh (review xhigh); A3 high (review high); A4 high (review medium); review cuối xhigh. Co-author phải ghi đúng agent thực tế, không ghi cứng số phiên bản model chưa được receipt chứng minh.
 - **2026-11-01, review Phần 2 (5 điểm, đối chiếu code tại `8321095`):**
   1. [Cao] Thêm mục 1.8: trả slot ở Host chỉ sau khi input đã nhả; ghi rõ quyền sở hữu `InputExecutor` và cách xử lý khi nhả thất bại. Thêm commit B0 và test "Viewer thứ hai lúc `endSession()` còn chạy".
   2. [TB] Bảng 2.2 chuyển thành bảng lớp cũ → đích theo từng bước: hai nửa vai trò chuyển ở A4, các lớp vỏ ở B2. `SubmitResult` chuyển sang `host`.
