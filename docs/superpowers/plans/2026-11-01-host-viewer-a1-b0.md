@@ -1,5 +1,11 @@
 # Đổi vai Host/Viewer — Plan C0 + A1–B0 (refactor trên wire v1)
 
+**Nghiệm thu ngày 2026-11-01:** C0 và A1–B0 đã qua review từng task và `clean verify` độc lập. SHA code cuối `84a4682a93fae5f41320e549e252bfd3a872d57e`: **910 test, 0 failures/errors/skipped**, năm gate branch coverage ≥0.80. Review toàn đợt đang chờ kết luận. [Báo cáo thực thi và ngoại lệ](../reports/2026-11-01-host-viewer-a1-b0-execution.md).
+
+**Chỉ dẫn provider mới nhất:** mọi worker/reviewer mới dùng **Codex `gpt-6.1-sol`**. A1/A2/B0 và review tương ứng: xhigh; A3: high/high; A4: high/medium; review toàn đợt: xhigh. G0/C0 đã được giao trước chỉ dẫn; C0 review và mọi dispatch sau đó đều là Codex. Các tên Sonnet và câu “chưa có code” trong bản G0 bên dưới là lịch sử, được phần nghiệm thu này thay thế. Receipt `launch.effective` là bằng chứng provider/model/effort.
+
+**Ngoại lệ đã nghiệm thu:** VF0 sửa test baseline trong commit riêng trước A1; A4 giữ hai FrameReceiver test ở `server`, mở đúng visibility cần thiết và chấp nhận năm file ngắn có similarity 84–88% sau audit thân code; B0 thêm helper chờ slot cục bộ với timeout cũ. Chi tiết và giới hạn cleanup nằm trong báo cáo. Worker C0/A1–B0 không sửa docs; coordinator cập nhật trạng thái trong commit tài liệu riêng sau các gate.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **Bản đính chính G0 (2026-11-01):** plan này được sửa sau commit `30d1604` theo `docs/superpowers/plans/2026-11-01-host-viewer-orchestration-roadmap.md` (người dùng đã duyệt thực thi). Thay đổi so với bản `30d1604`: (1) bỏ `LifecyclePort.wrap(Tx)` khỏi API sản xuất; (2) `tryActivate` ép kiểm lifetime của tx gốc; (3) thêm Task 0 (C0) sửa thời điểm đọc clock trước A1; (4) `inputReleaseSeam` ở B0 biến đổi giai đoạn nguồn của bridge; (5) định tuyến model/effort theo roadmap. Đây là tài liệu; chưa có dòng code nào của C0/A1–B0 được viết.
@@ -29,8 +35,8 @@
 - Giữ `inputReleased` là future **cố định tạo trong constructor** và `SessionSide.bridgeClosing` không bao giờ thay hay hoàn tất sớm future đó (A2, B0).
 - `viewer.ControlView` → `server.ServerPhase` là phụ thuộc ngược **tạm thời, giữ đến B1**. A4 không loại bỏ mọi phụ thuộc ngược và không được báo như vậy.
 - Comment và commit message tiếng Anh. Commit của worker kết thúc bằng dòng `Co-Authored-By` ghi **đúng agent/model thực tế** (lấy từ receipt `launch.effective` hoặc dòng attribution của harness); không ghi cứng số phiên bản model chưa được receipt chứng minh, không suy ra từ alias `sonnet`.
-- Không push/merge/rebase/amend. Không `taskkill /IM java.exe`. Không chạy Robot spike, `MouseTrialSpike` hay jar GUI. Không sửa `docs/` (G0 là task tài liệu duy nhất).
-- Model/effort (người dùng đã chấp nhận): G0 sonnet high; C0, A1, A2, B0 = sonnet xhigh, review xhigh; A3 = sonnet high, review high; A4 = sonnet high, review medium; review cuối branch = sonnet xhigh. Chỉ khẳng định model/effort đã dùng khi receipt `launch.effective` chứng minh.
+- Không push/merge/rebase/amend. Không `taskkill /IM java.exe`. Không chạy Robot spike, `MouseTrialSpike` hay jar GUI. Worker C0/A1–B0 không sửa `docs/`; coordinator ghi trạng thái nghiệm thu trong commit tài liệu riêng.
+- Model/effort hiện hành theo chỉ dẫn mới nhất: mọi dispatch mới dùng Codex `gpt-6.1-sol`; A1/A2/B0 xhigh và review xhigh; A3 high và review high; A4 high và review medium; review toàn đợt xhigh. G0/C0 đã giao trước khi đổi provider; xem báo cáo để biết lịch sử. Receipt `launch.effective` chứng minh model/effort thực tế.
 
 ## Review Focus
 

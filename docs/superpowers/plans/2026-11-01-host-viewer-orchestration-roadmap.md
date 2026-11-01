@@ -45,9 +45,9 @@
 
 G0 cập nhật plan/spec cho đúng ngoại lệ C0 và chữ ký mới, không để worker phải chọn giữa hai văn bản mâu thuẫn. Các quyết định này là hợp đồng tài liệu đã duyệt để thực thi, không phải code đã sửa hoặc đã được nghiệm thu. Ngoài ra G0 chốt: chuẩn bị adapter v1 (trước connect) giữ nguyên đến hết B0 và `rd-host-prepare` chỉ thuộc B1; `inputReleased` là target ổn định tạo từ constructor và `inputReleaseSeam` (B0) biến đổi stage nguồn trước bridge; `viewer.ControlView → server.ServerPhase` còn tạm đến B1.
 
-## Định tuyến model và effort
+## Định tuyến model và effort ban đầu (lịch sử)
 
-Model giữ **Claude Sonnet** theo lựa chọn người dùng; không tự chuyển sang model đắt hơn cho mọi task. Bảng định tuyến dưới đây **đã được người dùng chấp nhận**.
+Bảng dưới là định tuyến Sonnet ban đầu, trước chỉ dẫn mới nhất của người dùng. **Chỉ dẫn hiện hành: mọi worker/reviewer mới dùng Codex `gpt-6.1-sol`, không giao thêm Claude.** A1/A2/B0: xhigh/xhigh; A3: high/high; A4: high/medium; review toàn đợt: xhigh. G0/C0 đã được giao trước chỉ dẫn; C0 review và mọi dispatch sau đó đều là Codex. Receipt `launch.effective` đã được kiểm cho từng dispatch mới; không đổi global config.
 
 | Task | Worker thực hiện | Reviewer độc lập | Lý do |
 | --- | --- | --- | --- |
@@ -110,7 +110,7 @@ Executable đã resolve cho phiên khảo sát: `C:/Users/Admin/AppData/Local/Pr
 
 - [ ] Preflight: status ready, working tree đúng SHA/tình trạng đã bàn giao, không có worker khác đang sửa checkout hoặc Maven khác đang chạy. Dùng workspace hiện có đã được `worktree current` xác minh; không tạo worktree mới cho từng task khi không có xung đột cụ thể.
 - [ ] Tạo một Run cho phạm vi đã duyệt, hoặc tiếp tục đúng Run do người dùng bàn giao; không takeover Run của agent khác. Lưu `run_id`, `task_id`, `dispatch_id`, SHA và quyền ghi target vào sổ điều phối.
-- [ ] Tạo Task/Dispatch cho stage sẵn sàng bằng `orchestration worker-start --task <id> --worktree <exact-selector> --agent claude --model sonnet --effort <level> --json`. Exact selector đã quan sát: `identity:wt2:local:419fd186-c5a0-42ac-b8d6-0e1be9f95658`; xác minh lại trước chạy.
+- [x] Tạo Task/Dispatch cho stage sẵn sàng bằng `orchestration worker-start --task <id> --worktree <exact-selector> --agent codex --model gpt-6.1-sol --effort <level> --json`. Exact selector đã quan sát: `identity:wt2:local:419fd186-c5a0-42ac-b8d6-0e1be9f95658`; đã kiểm đúng workspace trong receipt.
 - [ ] Kiểm `launch.requested`/`launch.effective`; worker nhận self-contained brief và live preamble. Không khẳng định effort chỉ từ CLI hỗ trợ cờ.
 - [ ] Worker tuân thủ heartbeat/check/ask/worker_done trong live preamble. Coordinator trả lời question bằng reply của Orca; khi chỉ timeout thì chưa được coi worker đã chết hay retry.
 - [ ] Chấp nhận `worker_done` chỉ sau khi đối chiếu active Dispatch, outcome, SHA, files và log. Task settled không có nghĩa stage đã nghiệm thu; stage còn chờ review + verify.
@@ -127,11 +127,15 @@ Executable đã resolve cho phiên khảo sát: `C:/Users/Admin/AppData/Local/Pr
 - [ ] Review toàn diff từ baseline đã chốt; đọc cả source lẫn các thay đổi test/trace/coverage.
 - [ ] Đủ bằng chứng năm lớp mục tiêu ≥ 0.80; các test slot có latch 20 lượt đạt; không còn rò thread/port/ticker trong cleanup.
 - [ ] Báo rõ vẫn là v1, ControlView còn dùng ServerPhase tạm thời, chưa phải v2 đã chạy.
-- [ ] Trình bày/chốt Phần 3 UI/CLI và Phần 4 tài liệu/H2, rồi viết plan riêng B1/B2. Effort đề xuất: B1 Sonnet xhigh + reviewer xhigh; B2 Sonnet high + reviewer medium.
+- [ ] Trình bày/chốt Phần 3 UI/CLI và Phần 4 tài liệu/H2, rồi viết plan riêng B1/B2. Effort đề xuất theo provider hiện hành: B1 Codex xhigh + reviewer xhigh; B2 Codex high + reviewer medium. Giai đoạn này chưa bắt đầu.
 - [ ] Sau B2 mới chạy PIT trên SHA code/test cuối và 500 vòng race; H2 chạy trên hai máy theo spec. Xử lý finding trước merge. Không lấy kết quả A0 hoặc A1–B0 thay bằng chứng cho v2.
 
 ## Tình trạng hiện tại
 
-**Người dùng đã ủy quyền thực thi** lộ trình này (yêu cầu thực thi mới nhất, 2026-11-01). **G0 (chỉ tài liệu) đã bắt đầu** với Run/Task/Dispatch do coordinator tạo; **C0, A1, A2, A3, A4, B0 và review toàn nhánh chưa được thực thi**, B1/B2 hoãn đến khi Phần 3–4 được duyệt. Chưa có code hay test v2.
+**G0, C0 và A1–B0 đã hoàn tất**, mỗi task có review và verify. SHA code cuối `84a4682a93fae5f41320e549e252bfd3a872d57e`: coordinator `clean verify` đạt **910 test, 0 failures/errors/skipped**, cả năm gate ≥0.80; ba ca latch B0 đều đạt 20 lượt. Review toàn đợt đang chờ kết luận. [Báo cáo nghiệm thu, ngoại lệ và bằng chứng](../reports/2026-11-01-host-viewer-a1-b0-execution.md).
 
-Các mục "Bằng chứng baseline đã kiểm" và "Review Focus và kết luận tại 30d1604" ở trên là **bằng chứng lịch sử** tại `30d1604` (một lượt verify 613 test, đọc Orca runtime/CLI, review plan gốc); chúng không phải kết quả của G0 và không được dùng thay cho verify của các stage sau. Các checkbox của "Vòng coordinator dùng Orca thật" và "Checkpoint sau B0" vẫn là danh sách việc, chưa hoàn thành.
+**Vẫn là wire v1.** B1/B2, Phần 3–4, PIT/500 vòng race/H2 chưa được chứng nhận. Phụ thuộc `viewer.ControlView → server.ServerPhase` còn tạm đến B1. Không push/merge/rebase/amend.
+
+Cleanup B0 chứng minh session registrations về 0 trong fixture tắt pending ticker, đồng thời kiểm thread và port. Core mặc định có giới hạn bộ đếm pending registration tồn tại từ baseline: `Ticker.close` dừng executor nhưng không xóa tickables. Cần follow-up riêng; không diễn giải test này thành đã chứng minh bộ đếm core mặc định về 0.
+
+Các mục "Bằng chứng baseline đã kiểm" và "Review Focus và kết luận tại 30d1604" là **bằng chứng lịch sử** tại `30d1604`, không thay thế nghiệm thu SHA cuối. Checkbox cũ là checklist thiết kế; trạng thái thực thi có thẩm quyền nằm trong báo cáo nghiệm thu và ledger của Run `run_c4af214b4a8d`.
