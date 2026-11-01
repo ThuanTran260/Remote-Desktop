@@ -8,9 +8,11 @@ Ngày: 2026-11-01. Branch: `feat/wave3-4-desktop-v1`. Thay thế quy ước vai 
 | --- | --- | --- |
 | 1 | Hướng kết nối, bắt tay, deadline, hủy/mất kênh | Đã duyệt (2026-10-31) |
 | 2 | Tách package/lớp theo vai, trình tự commit, kiểm thử | **Đã duyệt để triển khai** (2026-11-01, người dùng chốt P2 sau review lần 4). A0 đã xong (`1b3eb94`); chưa có bằng chứng v2 |
-| 2′ | Lộ trình thực thi G0 → C0 → A1 → A2 → A3 → A4 → B0 → review toàn nhánh (roadmap `docs/superpowers/plans/2026-11-01-host-viewer-orchestration-roadmap.md`) | **Đã được người dùng duyệt thực thi** (yêu cầu thực thi mới nhất, 2026-11-01), gồm định tuyến model/effort. Chỉ G0 (tài liệu) đang chạy; C0–B0 chưa thực hiện; code/test v2 chưa tồn tại |
-| 3 | Giao diện và CLI (tên cửa sổ, cờ dòng lệnh) | Chưa trình bày; B1/B2 chưa được phép bắt đầu |
-| 4 | Tài liệu, lịch, nghiệm thu H2 | Chưa trình bày; B1/B2 chưa được phép bắt đầu |
+| 2′ | Lộ trình G0 → C0 → A1 → A2 → A3 → A4 → B0 → review toàn đợt | Đã thực thi, review PASS / APPROVED; code v1 `84a4682`. Follow-up pending ticker đã sửa ở `e58afc7`, coordinator verify 912 test đạt; chưa có code/test v2. [Báo cáo chuẩn bị v2](../reports/2026-11-02-host-viewer-v2-preparation.md). |
+| 3 | Giao diện và CLI (tên cửa sổ, cờ dòng lệnh) | [Đề xuất cụ thể đã qua builder review và sửa vòng 1](2026-11-02-host-viewer-ui-cli-h2-design.md), **chờ người dùng duyệt**; B1/B2 chưa được phép bắt đầu. |
+| 4 | Tài liệu, lịch, nghiệm thu H2 | Cùng đề xuất Phần 3–4 ở trên, đã có ma trận hai hướng và tiêu chí bằng chứng; **chờ duyệt**, chưa có kết quả H2 v2. |
+
+Định tuyến hiện hành theo người dùng: thực thi dùng Codex `gpt-6.1-sol`, effort theo độ khó; review cuối được phép dùng `gpt-6-astra`, không dùng Luna/model rẻ hơn hoặc giao thêm Claude. Các tên Sonnet trong lịch sử thiết kế bên dưới là định tuyến cũ. Khi quota còn khoảng 5%, lưu checkpoint và dừng; sau reset chỉ tiếp tục khi người dùng nói “bắt đầu”.
 
 ## 0. Mục tiêu
 

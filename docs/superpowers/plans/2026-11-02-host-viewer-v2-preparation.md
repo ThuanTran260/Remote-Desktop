@@ -20,6 +20,7 @@
 - Worker thực thi dùng `gpt-6.1-sol`, effort theo task; review cuối `gpt-6-astra`. Không dùng Luna, model rẻ hơn hoặc Claude. Kiểm `launch.effective`, không đổi config toàn cục.
 - Không tạo helper agent. Chỉ dùng lifecycle Orca, xác thực Task/Dispatch trước xử lý báo cáo và release trước ack. Mọi claim phải gắn với SHA và bằng chứng.
 - B1/B2 chỉ bắt đầu khi Phần 3–4 được trình bày và duyệt. H2 cần hai máy thật; không đánh dấu PASS bằng test headless. PIT/500 race thuộc SHA v2 cuối, chưa chạy trong đợt chuẩn bị này.
+- Khi quota còn khoảng 5%, dừng việc mới và ghi checkpoint đầy đủ; sau reset chỉ tiếp tục khi người dùng nói “bắt đầu”. Worker mới phải nhận quy tắc này, hoàn tất điểm dừng an toàn và báo trạng thái chưa kiểm chứng nếu bị ngắt giữa review.
 
 ## Review Focus
 
