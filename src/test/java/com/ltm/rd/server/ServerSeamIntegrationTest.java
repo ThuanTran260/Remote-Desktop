@@ -168,7 +168,7 @@ class ServerSeamIntegrationTest {
         CloseInfo info = s.lifecycle().closeInfo().orElseThrow();
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
         assertEquals("cannot start worker", info.message());
-        assertTrue(c.sessions().current().isEmpty(), "the slot is freed");
+        awaitTrue(() -> c.sessions().current().isEmpty(), "the slot is freed");
         assertNotEquals(oldCode, c.sessions().currentCode());
         assertNotNull(a);
     }

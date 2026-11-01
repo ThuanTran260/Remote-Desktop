@@ -12,6 +12,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionHandler;
@@ -23,11 +24,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongSupplier;
+import java.util.function.UnaryOperator;
 
 /**
  * Listens on the command and image ports, runs handshakes on a bounded pool and owns the shared
  * ticker, close scheduler and cleanup executor. The session factory only constructs; the ticker
- * registration and the socketsClosed wiring happen after {@code tryReserve} returned.
+ * registration and the release wiring happen after {@code tryReserve} returned.
  */
 public final class ServerCore implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(ServerCore.class.getName());
@@ -40,10 +42,18 @@ public final class ServerCore implements AutoCloseable {
      * {@code afterTokenCheck} runs inside the session lock, {@code beforeAttachImage} outside any
      * lock, {@code afterBind} between the bind and the publication of the sockets, {@code beforeResources}
      * after the sockets are published and before the executors, ticker, pool and acceptors are created;
-     * {@code pendingTickDisabled} leaves pending connections to their soTimeout fallback.
+     * {@code pendingTickDisabled} leaves pending connections to their soTimeout fallback;
+     * {@code inputReleaseSeam} transforms the side's closing source, never the session's target.
      */
     record Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
-            boolean pendingTickDisabled, Runnable afterBind, Runnable beforeResources) {
+            boolean pendingTickDisabled, Runnable afterBind, Runnable beforeResources,
+            UnaryOperator<CompletableFuture<Void>> inputReleaseSeam) {
+        Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
+                boolean pendingTickDisabled, Runnable afterBind, Runnable beforeResources) {
+            this(lifecycleThreads, afterTokenCheck, beforeAttachImage, pendingTickDisabled, afterBind,
+                    beforeResources, null);
+        }
+
         Seams(ThreadFactory lifecycleThreads, Runnable afterTokenCheck, Runnable beforeAttachImage,
                 boolean pendingTickDisabled, Runnable afterBind) {
             this(lifecycleThreads, afterTokenCheck, beforeAttachImage, pendingTickDisabled, afterBind, null);
@@ -241,14 +251,15 @@ public final class ServerCore implements AutoCloseable {
                 : new SessionLifecycle<>(ServerPhase.RESERVED, ServerPhase.CLOSING, clock, timeouts.closeGrace(),
                         scheduler, cleanup, seams.lifecycleThreads());
         ServerSession.Env env = new ServerSession.Env(timeouts, clock, ticker, sessions::shuttingDown,
-                seams.afterTokenCheck());
+                seams.afterTokenCheck(), true, seams.inputReleaseSeam());
         return new ServerSession(generation, token, peer, reservedAtNanos, lifecycle, env);
     }
 
-    /** After tryReserve returned: start the reserve deadline and free the slot once sockets are closed. */
+    /** After tryReserve returned: start the deadline and release only after all closing work succeeds. */
     private void onReserved(ServerSession session) {
         // wired first: if anything below failed, the slot would otherwise never be freed
-        session.lifecycle().socketsClosed().thenRun(() -> sessions.onSessionSocketsClosed(session));
+        CompletableFuture.allOf(session.socketsClosed(), session.terminated(), session.inputReleased())
+                .thenRun(() -> sessions.onSessionReleased(session)); // failed release keeps the slot BUSY
         Ticker.Registration registration = ticker.register(session);
         session.lifecycle().addStopHook(registration::close);
     }

@@ -348,7 +348,7 @@ class ServerHandshakeIntegrationTest {
         assertEquals(Packet.DisconnectReason.TIMEOUT, last.disconnectPayload().reason());
 
         ServerTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
-        assertTrue(c.sessions().current().isEmpty());
+        awaitTrue(() -> c.sessions().current().isEmpty(), "the server slot to be freed");
         assertNotEquals(oldCode, c.sessions().currentCode());
     }
 

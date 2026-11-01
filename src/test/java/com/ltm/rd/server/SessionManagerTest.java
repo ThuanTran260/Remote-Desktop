@@ -183,18 +183,33 @@ class SessionManagerTest {
     }
 
     @Test
+    void releaseOfAStaleSessionIsIgnored() throws Exception {
+        SessionManager m = manager();
+        ServerSession first = m.tryReserve(ip(1), 1, m.currentCode()).session();
+        m.onSessionReleased(first);
+        ServerSession second = m.tryReserve(ip(2), 1, m.currentCode()).session();
+        String secondCode = m.currentCode();
+        first.disconnect();
+        first.terminated().get(WAIT_S, TimeUnit.SECONDS);
+        m.onSessionReleased(first);
+        assertSame(second, m.current().orElseThrow());
+        assertEquals(secondCode, m.currentCode());
+        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(3), 1, secondCode).status());
+    }
+
+    @Test
     void staleSocketsClosedCallbackDoesNotTouchNewSession() throws Exception {
         SessionManager m = manager();
         String firstCode = m.currentCode();
         ServerSession first = m.tryReserve(ip(1), 1, firstCode).session();
-        m.onSessionSocketsClosed(first);
+        m.onSessionReleased(first);
         assertTrue(m.current().isEmpty());
         String secondCode = m.currentCode();
         assertNotEquals(firstCode, secondCode, "a closed session always yields a new code");
 
         ServerSession second = m.tryReserve(ip(2), 1, secondCode).session();
         assertEquals(2, second.generation());
-        m.onSessionSocketsClosed(first); // stale callback from the old generation
+        m.onSessionReleased(first); // stale callback from the old generation
         assertSame(second, m.current().orElseThrow());
         assertEquals(secondCode, m.currentCode());
     }
@@ -215,7 +230,7 @@ class SessionManagerTest {
         assertFalse(m.shuttingDown());
         m.setShuttingDown();
         assertTrue(m.shuttingDown());
-        m.onSessionSocketsClosed(s1);
+        m.onSessionReleased(s1);
         assertTrue(m.current().isEmpty());
         assertEquals(code, m.currentCode());
         assertFalse(m.regenerateCode());
@@ -254,7 +269,7 @@ class SessionManagerTest {
     void tokensAndGenerationsDifferBetweenSessions() throws Exception {
         SessionManager m = manager();
         ServerSession a = m.tryReserve(ip(1), 1, m.currentCode()).session();
-        m.onSessionSocketsClosed(a);
+        m.onSessionReleased(a);
         ServerSession b = m.tryReserve(ip(1), 1, m.currentCode()).session();
         assertEquals(a.generation() + 1, b.generation());
         assertFalse(Arrays.equals(a.token(), b.token()));

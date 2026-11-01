@@ -34,6 +34,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -178,6 +180,14 @@ class GoldenWireTraceTest {
 
     private static void awaitSeen(RecordingRelay.Trace trace, Dir dir, PacketType type) throws InterruptedException {
         assertTrue(trace.await(dir, type), "timed out waiting for " + dir + " " + type);
+    }
+
+    private static void awaitTrue(BooleanSupplier condition, String what) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_S);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() < deadline, "timed out waiting for " + what);
+            LockSupport.parkNanos(1_000_000);
+        }
     }
 
     private static ServerSession serverSession(ServerCore core) {
@@ -337,7 +347,7 @@ class GoldenWireTraceTest {
         assertEquals(Packet.DisconnectReason.TIMEOUT, clientInfo.reason());
         assertEquals("peer disconnected", clientInfo.message());
         assertEquals(0, c.inputBeginCount());
-        assertTrue(core.sessions().current().isEmpty(), "the slot is free again");
+        awaitTrue(() -> core.sessions().current().isEmpty(), "the slot is free again");
         assertNotEquals(codeBefore, core.sessions().currentCode(), "the code changed with the slot");
     }
 
@@ -365,7 +375,7 @@ class GoldenWireTraceTest {
         assertEquals(Packet.DisconnectReason.USER, clientInfo.reason());
         assertEquals("cancelled", clientInfo.message());
         c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
-        assertTrue(core.sessions().current().isEmpty());
+        awaitTrue(() -> core.sessions().current().isEmpty(), "the server slot to be freed");
         assertNotEquals(codeBefore, core.sessions().currentCode());
     }
 
@@ -393,7 +403,7 @@ class GoldenWireTraceTest {
         assertEquals(Packet.DisconnectReason.USER, clientInfo.reason());
         assertEquals("peer disconnected", clientInfo.message());
         c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
-        assertTrue(core.sessions().current().isEmpty());
+        awaitTrue(() -> core.sessions().current().isEmpty(), "the server slot to be freed");
         assertNotEquals(codeBefore, core.sessions().currentCode());
     }
 

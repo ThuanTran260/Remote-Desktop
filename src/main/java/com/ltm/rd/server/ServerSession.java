@@ -20,6 +20,7 @@ import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
 import com.ltm.rd.common.SessionLifecycle;
 import com.ltm.rd.common.SessionPort;
+import com.ltm.rd.common.SessionSide;
 import com.ltm.rd.common.Tickable;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
@@ -37,6 +38,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
+import java.util.function.UnaryOperator;
 
 /**
  * Server side of one session. All state changes go through {@code lifecycle.atomically}; side
@@ -48,7 +50,13 @@ public final class ServerSession implements Tickable {
 
     /** Collaborators a session needs besides its identity; {@code ticker} may be null in unit tests. */
     record Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
-            Runnable afterTokenCheck, boolean receiveFrames) {
+            Runnable afterTokenCheck, boolean receiveFrames,
+            UnaryOperator<CompletableFuture<Void>> inputReleaseSeam) {
+        Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
+                Runnable afterTokenCheck, boolean receiveFrames) {
+            this(timeouts, clock, ticker, shuttingDown, afterTokenCheck, receiveFrames, null);
+        }
+
         Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
                 Runnable afterTokenCheck) {
             this(timeouts, clock, ticker, shuttingDown, afterTokenCheck, true);
@@ -79,6 +87,7 @@ public final class ServerSession implements Tickable {
 
     private final SessionPort port;
     private final ControlSide side;
+    private final CompletableFuture<Void> inputReleased;
     private volatile Heartbeat heartbeat;
 
     ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
@@ -94,6 +103,7 @@ public final class ServerSession implements Tickable {
         this.reservedAtNanos = reservedAtNanos;
         this.lifecycle = Objects.requireNonNull(lifecycle);
         this.env = Objects.requireNonNull(env);
+        this.inputReleased = new CompletableFuture<>();
         this.port = new LifecyclePort<>(lifecycle, generation, env.ticker(), env.clock(),
                 new LifecyclePort.Shell<>() {
                     @Override public boolean isActive(ServerPhase phase) { return phase == ServerPhase.ACTIVE; }
@@ -103,6 +113,10 @@ public final class ServerSession implements Tickable {
                     @Override public void tryActivate(SessionLifecycle.Tx<ServerPhase> tx) { maybeActivate(tx); }
                 });
         this.side = new ControlSide(port, env.timeouts(), env.clock(), env.receiveFrames());
+        lifecycle.addCloseHook(() -> SessionSide.bridgeClosing(() -> {
+            CompletableFuture<Void> source = side.onClosing();
+            return env.inputReleaseSeam() == null ? source : env.inputReleaseSeam().apply(source);
+        }, inputReleased));
     }
 
     public long generation() {
@@ -349,6 +363,11 @@ public final class ServerSession implements Tickable {
     /** Completes when the session is closed, its sockets are closed and its workers have stopped. */
     public CompletableFuture<CloseInfo> terminated() {
         return lifecycle.terminated();
+    }
+
+    /** Stable target that completes only when the role's closing stage succeeds. */
+    public CompletableFuture<Void> inputReleased() {
+        return inputReleased;
     }
 
     public Optional<CloseInfo> closeInfo() {

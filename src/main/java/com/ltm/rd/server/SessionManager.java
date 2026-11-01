@@ -21,7 +21,7 @@ public final class SessionManager {
     /**
      * Runs under the manager lock, so it must only construct an object that is not running yet: no
      * ticker, no thread, no {@code atomically}. Registration with the ticker and wiring of
-     * {@code socketsClosed()} happen after {@link #tryReserve} returns.
+     * the session's release barrier happen after {@link #tryReserve} returns.
      */
     @FunctionalInterface
     public interface SessionFactory {
@@ -36,7 +36,7 @@ public final class SessionManager {
 
     private final Object lock = new Object();
     private String code; // guarded by lock
-    private ServerSession current; // guarded by lock; present from reservation until sockets are closed
+    private ServerSession current; // guarded by lock; present from reservation until the release barrier succeeds
     private long generation; // guarded by lock
     private volatile boolean shuttingDown;
 
@@ -107,7 +107,7 @@ public final class SessionManager {
     }
 
     /** Releases the slot and issues a new code; ignored for a session that is no longer current. */
-    public void onSessionSocketsClosed(ServerSession s) {
+    public void onSessionReleased(ServerSession s) {
         synchronized (lock) {
             if (s != current) return;
             current = null;
