@@ -2,7 +2,9 @@
 
 ## Quy tắc dừng và tiếp tục
 
-Người dùng yêu cầu: khi quota còn khoảng 5%, lưu checkpoint rồi dừng. **Sau reset chỉ tiếp tục khi người dùng nói “bắt đầu”; không tự chạy lại.** Bản checkpoint này được chuẩn bị trước ngưỡng để tránh mất trạng thái. Quan sát gần nhất khi chuẩn bị: CLI coordinator 11%, reviewer 13%, reset hiển thị 05:33 giờ máy (Asia/Bangkok). Không suy quota từ token budget.
+**ĐÃ DỪNG TẠI CHECKPOINT QUOTA.** CLI coordinator báo 6% trong lúc chốt, giữ phần dự phòng khoảng 5% thay vì mở một lượt review dài có thể vượt ngưỡng. **Sau reset chỉ tiếp tục khi người dùng nói “bắt đầu”; không tự chạy lại.** Reset hiển thị 05:33 giờ máy (Asia/Bangkok). Đây là quan sát quota CLI, không suy từ token budget.
+
+Tài liệu tích hợp đã commit ở `11258cd`; commit checkpoint cập nhật này và ledger ghi HEAD bàn giao cuối. Source vẫn bằng `e58afc7` đã verify. Sáu Dispatch của Run đã settle/release, không còn agent active hoặc Delivery chưa xử lý tại lúc dừng. Gói review cuối và brief đã chuẩn bị; chưa có reviewer Astra được giao.
 
 ## Nơi làm việc và thẩm quyền
 

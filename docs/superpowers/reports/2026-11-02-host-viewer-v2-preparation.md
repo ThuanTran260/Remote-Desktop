@@ -41,6 +41,8 @@ Gate Task 1 và builder/re-review Task 2 đã đạt; review toàn đợt Astra 
 
 Theo chỉ dẫn mới, khi quota còn khoảng 5% phải ghi checkpoint và dừng; sau reset không tự chạy, chỉ tiếp tục khi người dùng nói “bắt đầu”. Checkpoint ghi rõ review/gate nào còn thiếu, không đổi chúng thành PASS để kết thúc phiên.
 
+Đã dừng an toàn khi CLI báo 6% trong lúc chốt phần dự phòng. [Checkpoint để tiếp tục](../checkpoints/2026-11-02-host-viewer-v2-preparation.md) ghi SHA, sáu Dispatch đã release, gói diff/brief và lệnh phục hồi. **Review toàn đợt Astra chưa khởi chạy**, chưa có verdict cuối; không triển khai B1/B2 trong lần dừng này.
+
 ## Coordinator rulings (ordered ledger extract)
 
 - Ruling: keep the user's established feature checkout and separate draft writers from the sole source/index owner — independent report work is authorized while another worktree would add unnecessary integration — cost if wrong: recoverable local commit rework; no shared branch push.
