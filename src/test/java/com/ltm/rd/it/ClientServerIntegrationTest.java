@@ -388,6 +388,20 @@ class ClientServerIntegrationTest {
         c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
     }
 
+    @Test
+    void activatedCompletesBeforeSenderStartHook() throws Exception {
+        ServerCore core = core(normal());
+        HeldHook beforeSender = new HeldHook();
+        ClientSession c = client(core, core.sessions().currentCode(), normal(), new ClientHooks(null, beforeSender));
+        c.start();
+        await(beforeSender.reached, "the sender start point");
+        assertTrue(c.activated().isDone());
+        assertFalse(c.activated().isCompletedExceptionally());
+        beforeSender.release.countDown();
+        c.cancel();
+        awaitTerminated(c);
+    }
+
     // ---- failures --------------------------------------------------------------------------
 
     @Test

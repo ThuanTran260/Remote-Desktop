@@ -10,6 +10,13 @@ import java.util.OptionalLong;
  * the ping offer and {@code onTimeout} run after it is released.
  */
 public final class Heartbeat implements Tickable {
+    /** Answers a shell-accepted PING in the same transaction as its overflow decision. */
+    public static void answerPing(SideTx stx, SessionPort port, Packet ping) {
+        if (port.offer(Packet.pong(ping.seq())) == CommandWriter.OfferResult.OVERFLOW) {
+            stx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
+        }
+    }
+
     private final CommandWriter writer;
     private final long intervalNanos;
     private final long livenessNanos;

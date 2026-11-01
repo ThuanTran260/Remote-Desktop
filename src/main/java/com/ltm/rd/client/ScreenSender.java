@@ -4,7 +4,7 @@ import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
-import com.ltm.rd.common.SessionLifecycle;
+import com.ltm.rd.common.SessionPort;
 import com.ltm.rd.common.WriteTracker;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
@@ -25,7 +25,8 @@ public final class ScreenSender {
     private static final long GEOMETRY_CHECK_NANOS = TimeUnit.SECONDS.toNanos(1);
     private static final long SLEEP_SLICE_NANOS = TimeUnit.MILLISECONDS.toNanos(50);
 
-    private final ClientSession session;
+    private final SessionPort port;
+    private final ScreenGeometry announced;
     private final Channel img;
     private final ScreenSource screen;
     private final FrameEncoder encoder;
@@ -34,10 +35,11 @@ public final class ScreenSender {
     private final WriteTracker tracker = new WriteTracker();
     private final AtomicLong framesSent = new AtomicLong();
 
-    public ScreenSender(ClientSession session, Channel img, ScreenSource screen, FrameEncoder encoder, int fps,
-            LongSupplier nanoClock) {
+    public ScreenSender(SessionPort port, ScreenGeometry announced, Channel img, ScreenSource screen,
+            FrameEncoder encoder, int fps, LongSupplier nanoClock) {
         if (fps < 1) throw new IllegalArgumentException("fps must be >= 1");
-        this.session = Objects.requireNonNull(session);
+        this.port = Objects.requireNonNull(port);
+        this.announced = Objects.requireNonNull(announced);
         this.img = Objects.requireNonNull(img);
         this.screen = Objects.requireNonNull(screen);
         this.encoder = Objects.requireNonNull(encoder);
@@ -61,16 +63,15 @@ public final class ScreenSender {
     }
 
     private void run() {
-        SessionLifecycle<ClientPhase> lifecycle = session.lifecycle();
-        ScreenGeometry initial = session.announcedGeometry();
+        ScreenGeometry initial = announced;
         long nextGeometryCheck = clock.getAsLong() + GEOMETRY_CHECK_NANOS;
         try {
-            while (!lifecycle.isClosed()) {
+            while (!port.isClosed()) {
                 long cycleStart = clock.getAsLong();
                 if (cycleStart - nextGeometryCheck >= 0) {
                     nextGeometryCheck = cycleStart + GEOMETRY_CHECK_NANOS;
                     if (!initial.equals(screen.geometry())) {
-                        lifecycle.close(new CloseInfo(Packet.DisconnectReason.SCREEN_CHANGED, "screen changed", true));
+                        port.close(new CloseInfo(Packet.DisconnectReason.SCREEN_CHANGED, "screen changed", true));
                         return;
                     }
                 }
@@ -81,7 +82,7 @@ public final class ScreenSender {
                     packet = Packet.frame(frame.width(), frame.height(), frame.jpeg());
                 } catch (IOException | RuntimeException e) {
                     // the command channel still works: tell the Server the real reason
-                    lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "capture failed", true));
+                    port.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "capture failed", true));
                     return;
                 }
                 long op = tracker.begin(clock.getAsLong());
@@ -95,11 +96,11 @@ public final class ScreenSender {
                     intact = tracker.end(op);
                 }
                 if (!intact) return;
-                if (!sleepRest(lifecycle, cycleStart)) return;
+                if (!sleepRest(cycleStart)) return;
             }
         } catch (Throwable e) { // incl. interruption of a blocked write: the session decides what that means
-            if (!lifecycle.isClosed()) {
-                lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "image send failed", false));
+            if (!port.isClosed()) {
+                port.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "image send failed", false));
             }
         }
     }
@@ -109,15 +110,15 @@ public final class ScreenSender {
      * session closed, or the thread was interrupted. The close procedure interrupts workers, so an
      * interrupt on an open session is unexpected; the session is then closed rather than spun on.
      */
-    private boolean sleepRest(SessionLifecycle<ClientPhase> lifecycle, long cycleStart) {
+    private boolean sleepRest(long cycleStart) {
         long deadline = cycleStart + periodNanos;
-        while (!lifecycle.isClosed()) {
+        while (!port.isClosed()) {
             long left = deadline - clock.getAsLong();
             if (left <= 0) return true;
             LockSupport.parkNanos(Math.min(left, SLEEP_SLICE_NANOS));
             if (Thread.currentThread().isInterrupted()) {
-                if (!lifecycle.isClosed()) {
-                    lifecycle.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "screen sender interrupted", true));
+                if (!port.isClosed()) {
+                    port.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "screen sender interrupted", true));
                 }
                 return false;
             }

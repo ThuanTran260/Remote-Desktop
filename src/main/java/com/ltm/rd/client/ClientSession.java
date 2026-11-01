@@ -5,19 +5,21 @@ import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.ClosedSessionException;
 import com.ltm.rd.common.CommandWriter;
 import com.ltm.rd.common.Heartbeat;
+import com.ltm.rd.common.LifecyclePort;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
 import com.ltm.rd.common.SessionLifecycle;
+import com.ltm.rd.common.SessionPort;
+import com.ltm.rd.common.SessionSide;
 import com.ltm.rd.common.Tickable;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.common.TrafficCounter;
 import com.ltm.rd.common.TrafficSnapshot;
 import com.ltm.rd.common.WriteWatchdog;
-import java.awt.Rectangle;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -31,7 +33,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -42,8 +43,6 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class ClientSession implements Tickable {
     private static final int IMAGE_SEND_BUFFER = 64 * 1024;
-    private static final int FPS = 12;
-    private static final float FRAME_QUALITY = 0.6f;
 
     /** What the Server may send to the Client on the command channel. */
     private static final Set<PacketType> COMMAND_IN = EnumSet.of(PacketType.SESSION_ACTIVE, PacketType.PING,
@@ -53,8 +52,6 @@ public final class ClientSession implements Tickable {
 
     private final ClientConfig cfg;
     private final Timeouts timeouts;
-    private final long generation;
-    private final InputExecutor input;
     private final ScreenSource screen;
     private final SocketConnector connector;
     private final ClientHooks hooks;
@@ -65,20 +62,16 @@ public final class ClientSession implements Tickable {
     private final CompletableFuture<Void> activated = new CompletableFuture<>();
     private final CompletableFuture<Void> inputReleased = new CompletableFuture<>();
     private final AtomicReference<Packet.AuthStatus> authFailure = new AtomicReference<>();
-    private final AtomicInteger inputBegins = new AtomicInteger();
-    private final AtomicInteger senderRuns = new AtomicInteger();
+    private final SessionPort port;
+    private final ControlledSide side;
 
     // guarded by the lifecycle lock (read and written only inside atomically)
     private boolean activationReceived;
     private boolean imageChannelReady;
     private boolean startAttempted;
-    private boolean inputBegun;
     private CommandWriter writer;
-    private CommandReceiver receiver;
     private Channel imageChannel;
     private Channel commandChannel;
-    private volatile ScreenSender sender;
-    private volatile ScreenGeometry announced; // the geometry SCREEN_INFO was derived from
 
     private volatile Heartbeat heartbeat;
     private volatile Long authDeadlineNanos; // set when AUTHENTICATING begins
@@ -89,14 +82,24 @@ public final class ClientSession implements Tickable {
             Executor cleanup) {
         this.cfg = Objects.requireNonNull(cfg);
         this.timeouts = cfg.timeouts();
-        this.generation = generation;
-        this.input = Objects.requireNonNull(input);
         this.screen = Objects.requireNonNull(screen);
         this.connector = Objects.requireNonNull(connector);
         this.hooks = Objects.requireNonNull(hooks);
         this.ticker = Objects.requireNonNull(ticker);
         this.lifecycle = new SessionLifecycle<>(ClientPhase.CONNECTING, ClientPhase.CLOSING, cfg.nanoClock(),
                 timeouts.closeGrace(), scheduler, cleanup);
+        this.port = new LifecyclePort<>(lifecycle, generation, ticker, cfg.nanoClock(),
+                new LifecyclePort.Shell<>() {
+                    @Override public boolean isActive(ClientPhase phase) { return phase == ClientPhase.ACTIVE; }
+                    @Override public boolean isActivationPending(ClientPhase phase) { return phase == ClientPhase.ATTACHING; }
+                    @Override public boolean activationExpired(long now) {
+                        Long deadline = activationDeadlineNanos;
+                        return deadline != null && now - deadline >= 0;
+                    }
+                    @Override public CommandWriter writer() { return writer; }
+                    @Override public void tryActivate(SessionLifecycle.Tx<ClientPhase> tx) { tryStart(tx); }
+                });
+        this.side = new ControlledSide(port, input, screen, timeouts, cfg.nanoClock(), hooks.beforeSenderStart());
         lifecycle.addCloseHook(this::onClosing);
     }
 
@@ -144,8 +147,7 @@ public final class ClientSession implements Tickable {
     }
 
     public long releaseAllReceived() {
-        CommandReceiver r = lifecycle.atomically(tx -> receiver);
-        return r == null ? 0 : r.releaseAllReceived();
+        return side.releaseAllReceived();
     }
 
     public SessionLifecycle<ClientPhase> lifecycle() {
@@ -169,8 +171,7 @@ public final class ClientSession implements Tickable {
 
     /** Frames the screen sender wrote and flushed. */
     public long framesSent() {
-        ScreenSender s = sender;
-        return s == null ? 0 : s.framesSent();
+        return side.framesSent();
     }
 
     // Observability for tests: how far the two start conditions and the start itself got.
@@ -185,12 +186,12 @@ public final class ClientSession implements Tickable {
 
     /** Number of times input began for this session; must never exceed one. */
     public int inputBeginCount() {
-        return inputBegins.get();
+        return side.inputBeginCount();
     }
 
     /** Number of times the screen sender worker body ran. */
     public int senderRuns() {
-        return senderRuns.get();
+        return side.senderRuns();
     }
 
     // ---- deadlines -------------------------------------------------------------------------
@@ -276,9 +277,8 @@ public final class ClientSession implements Tickable {
         }
 
         ScreenGeometry geometry = screen.geometry(); // read before the transaction: no work under the lock
-        announced = geometry;
-        Rectangle bounds = geometry.bounds();
-        if (!attachCommandChannel(cmdChannel, bounds)) return;
+        side.announce(geometry);
+        if (!attachCommandChannel(cmdChannel)) return;
 
         Socket img = lifecycle.register(new Socket());
         img.setSendBufferSize(IMAGE_SEND_BUFFER);
@@ -301,7 +301,7 @@ public final class ClientSession implements Tickable {
      * Right after AUTH_RESULT(OK): enter ATTACHING with its deadline and take over the command
      * channel in one transaction; workers start and tickers register after the lock is released.
      */
-    private boolean attachCommandChannel(Channel ch, Rectangle bounds) {
+    private boolean attachCommandChannel(Channel ch) {
         return lifecycle.atomically(tx -> {
             if (!tx.advance(ClientPhase.AUTHENTICATING, ClientPhase.ATTACHING)) return false;
             activationDeadlineNanos = cfg.nanoClock().getAsLong() + timeouts.clientActivation().toNanos();
@@ -314,7 +314,6 @@ public final class ClientSession implements Tickable {
             if (!stepSet) return false; // closed: the writer must not start
             writer = w;
             commandChannel = ch;
-            receiver = new CommandReceiver(input, generation, bounds, w);
             Heartbeat hb = new Heartbeat(w, timeouts.pingInterval(), timeouts.liveness(),
                     cfg.nanoClock().getAsLong(),
                     () -> lifecycle.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "liveness timeout", true)));
@@ -322,7 +321,7 @@ public final class ClientSession implements Tickable {
                     () -> lifecycle.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "command write stuck", false)));
             heartbeat = hb;
             lifecycle.addStopHook(w::stop); // after workers are interrupted and sockets closed
-            w.offer(Packet.screenInfo(bounds.width, bounds.height));
+            port.atomically(stx -> { side.onAuthenticated(stx); return null; });
             tx.after(() -> setCommandReadTimeout(ch)); // before the reader starts; not under the lock
             tx.after(() -> w.start(lifecycle::startWorker));
             tx.after(() -> lifecycle.startWorker("rd-cmd-reader", () -> readLoop(ch)));
@@ -384,9 +383,10 @@ public final class ClientSession implements Tickable {
                     activationReceived = true;
                     tryStart(tx);
                 }
+                case PING -> port.atomically(stx -> { Heartbeat.answerPing(stx, port, p); return null; });
                 case PONG -> { }
                 case DISCONNECT -> tx.close(new CloseInfo(p.disconnectPayload().reason(), "peer disconnected", false));
-                default -> receiver.handle(tx, p); // PING and the input commands
+                default -> port.atomically(stx -> { side.onPacket(stx, p); return null; });
             }
             return true;
         });
@@ -407,52 +407,20 @@ public final class ClientSession implements Tickable {
         if (startAttempted) return;
         if (!activationReceived || !imageChannelReady) return;
         if (tx.isClosed() || tx.phase() != ClientPhase.ATTACHING) return;
+        if (!side.readyForActive()) return;
         startAttempted = true;
-        if (!input.beginSession(generation)) {
+        tx.after(() -> activated.complete(null));
+        // The controlled role does not use activation time; retain C0's no-clock-read decision.
+        if (!port.atomically(stx -> side.onActive(stx, 0L, imageChannel))) {
             tx.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "input session refused", true));
             return;
         }
-        inputBegun = true;
-        inputBegins.incrementAndGet();
         tx.advance(ClientPhase.ATTACHING, ClientPhase.ACTIVE);
-        tx.after(() -> activated.complete(null));
-        tx.after(this::startSender);
     }
 
-    /** Hook point for the screen sender; the sender itself arrives with the image stream. */
-    private void startSender() {
-        hooks.beforeSenderStart().run(); // lets a test cancel between "input began" and "sender started"
-        Channel img = lifecycle.atomically(tx -> imageChannel);
-        ScreenSender sender = new ScreenSender(this, img, screen,
-                new FrameEncoder(Protocol.MAX_FRAME_WIDTH, FRAME_QUALITY), FPS, cfg.nanoClock());
-        this.sender = sender;
-        WriteWatchdog dog = new WriteWatchdog(sender.tracker(), timeouts.imgWriteLimit(),
-                () -> lifecycle.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "image write stuck", true)));
-        Ticker.Registration registration = ticker.register(dog);
-        lifecycle.addStopHook(registration::close); // closed at once if the session is already closed
-        Runnable body = sender.body();
-        lifecycle.startWorker("rd-screen-sender", () -> {
-            senderRuns.incrementAndGet();
-            body.run();
-        });
-    }
-
-    /** Geometry announced in SCREEN_INFO; the sender compares against it. */
-    ScreenGeometry announcedGeometry() {
-        return announced;
-    }
-
-    /** Close hook: release input for this generation, if it began, and publish the result. */
+    /** Close hook: fail activation first, then bridge release into the constructor-owned target. */
     private void onClosing() {
-        boolean begun = lifecycle.atomically(tx -> inputBegun);
         activated.completeExceptionally(new ClosedSessionException("closed before active"));
-        if (!begun) {
-            inputReleased.complete(null);
-            return;
-        }
-        input.endSession(generation).whenComplete((v, e) -> {
-            if (e != null) inputReleased.completeExceptionally(e);
-            else inputReleased.complete(null);
-        });
+        SessionSide.bridgeClosing(side, inputReleased);
     }
 }

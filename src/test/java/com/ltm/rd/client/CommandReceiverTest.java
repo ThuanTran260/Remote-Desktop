@@ -4,22 +4,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.CommandWriter;
+import com.ltm.rd.common.LifecyclePort;
 import com.ltm.rd.common.Packet;
-import com.ltm.rd.common.PacketIO;
-import com.ltm.rd.common.PacketType;
-import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.SessionLifecycle;
 import java.awt.Rectangle;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.OutputStream;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
@@ -45,7 +36,6 @@ class CommandReceiverTest {
         return t;
     });
     private final List<FakeInputDevice.Gate> gates = new ArrayList<>();
-    private final List<CommandWriter> writers = new ArrayList<>();
 
     private FakeInputDevice device;
     private InputExecutor executor;
@@ -60,7 +50,6 @@ class CommandReceiverTest {
     void tearDown() throws Exception {
         gates.forEach(FakeInputDevice.Gate::open);
         executor.shutdownAsync().get(WAIT_S, TimeUnit.SECONDS);
-        writers.forEach(CommandWriter::stop);
         scheduler.shutdownNow();
         cleanup.shutdownNow();
     }
@@ -76,28 +65,30 @@ class CommandReceiverTest {
         return lc;
     }
 
-    private CommandWriter unstartedWriter() {
-        CommandWriter w = new CommandWriter(new DataOutputStream(new ByteArrayOutputStream()), t -> {});
-        writers.add(w);
-        return w;
-    }
-
     private static void handle(SessionLifecycle<ClientPhase> lc, CommandReceiver receiver, Packet p) {
-        lc.atomically(tx -> {
-            receiver.handle(tx, p);
+        LifecyclePort<ClientPhase> port = new LifecyclePort<>(lc, 1, null, System::nanoTime,
+                new LifecyclePort.Shell<>() {
+                    @Override public boolean isActive(ClientPhase phase) { return phase == ClientPhase.ACTIVE; }
+                    @Override public boolean isActivationPending(ClientPhase phase) { return phase == ClientPhase.ATTACHING; }
+                    @Override public boolean activationExpired(long now) { return false; }
+                    @Override public CommandWriter writer() { return null; }
+                    @Override public void tryActivate(SessionLifecycle.Tx<ClientPhase> tx) { }
+                });
+        port.atomically(stx -> {
+            receiver.handle(stx, p);
             return null;
         });
     }
 
-    private CommandReceiver receiver(long generation, CommandWriter writer) {
-        return new CommandReceiver(executor, generation, BOUNDS, writer);
+    private CommandReceiver receiver(long generation) {
+        return new CommandReceiver(executor, generation, BOUNDS);
     }
 
     @Test
     void pointerOutsideScreenIsProtocolError() {
         assertTrue(executor.beginSession(1));
         SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
-        CommandReceiver r = receiver(1, unstartedWriter());
+        CommandReceiver r = receiver(1);
         handle(lc, r, Packet.mouseMove(1919, 1079)); // last valid pixel
         assertFalse(lc.isClosed());
         handle(lc, r, Packet.mouseMove(1920, 5));
@@ -109,7 +100,7 @@ class CommandReceiverTest {
     void controlBeforeActiveIsProtocolError() throws Exception {
         assertTrue(executor.beginSession(1));
         SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ATTACHING);
-        CommandReceiver r = receiver(1, unstartedWriter());
+        CommandReceiver r = receiver(1);
         handle(lc, r, Packet.keyPress(65));
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, lc.closeInfo().orElseThrow().reason());
         assertFalse(device.awaitCall("keyPress:65"), "nothing may reach the device before ACTIVE");
@@ -119,7 +110,7 @@ class CommandReceiverTest {
     void keyPressMapsToInputCommand() throws Exception {
         assertTrue(executor.beginSession(1));
         SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
-        CommandReceiver r = receiver(1, unstartedWriter());
+        CommandReceiver r = receiver(1);
         handle(lc, r, Packet.keyPress(65));
         assertTrue(device.awaitCall("keyPress:65"));
         handle(lc, r, Packet.mouseMove(10, 20));
@@ -135,7 +126,7 @@ class CommandReceiverTest {
     void releaseAllIsCountedWhenAccepted() throws Exception {
         assertTrue(executor.beginSession(1));
         SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
-        CommandReceiver r = receiver(1, unstartedWriter());
+        CommandReceiver r = receiver(1);
         assertEquals(0, r.releaseAllReceived());
         handle(lc, r, Packet.keyPress(17));
         handle(lc, r, Packet.releaseAll());
@@ -143,7 +134,7 @@ class CommandReceiverTest {
         assertTrue(device.awaitCall("keyRelease:17"), "RELEASE_ALL reaches the executor");
 
         SessionLifecycle<ClientPhase> early = lifecycle(ClientPhase.ATTACHING);
-        CommandReceiver r2 = receiver(1, unstartedWriter());
+        CommandReceiver r2 = receiver(1);
         handle(early, r2, Packet.releaseAll());
         assertEquals(0, r2.releaseAllReceived(), "a rejected RELEASE_ALL is not counted");
     }
@@ -156,7 +147,7 @@ class CommandReceiverTest {
         FakeInputDevice.Gate gate = device.blockOn("keyPress:1");
         gates.add(gate);
         SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
-        CommandReceiver r = receiver(1, unstartedWriter());
+        CommandReceiver r = receiver(1);
         handle(lc, r, Packet.keyPress(1));
         assertTrue(gate.awaitEntered(), "the worker is now blocked inside the device");
         handle(lc, r, Packet.keyPress(2)); // fills the one-slot deque
@@ -168,48 +159,8 @@ class CommandReceiverTest {
     @Test
     void staleGenerationClosesSession() {
         SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
-        CommandReceiver r = receiver(7, unstartedWriter()); // the executor never began generation 7
+        CommandReceiver r = receiver(7); // the executor never began generation 7
         handle(lc, r, Packet.keyPress(65));
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, lc.closeInfo().orElseThrow().reason());
-    }
-
-    @Test
-    void pongThatOverflowsTheWriterQueueClosesTheSession() {
-        CommandWriter tiny = new CommandWriter(new DataOutputStream(new ByteArrayOutputStream()), 1, Thread::new,
-                t -> {}, System::nanoTime);
-        writers.add(tiny);
-        assertEquals(CommandWriter.OfferResult.ACCEPTED, tiny.offer(Packet.ping(1))); // the queue is now full
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ATTACHING);
-        handle(lc, receiver(1, tiny), Packet.ping(2));
-        assertEquals(Packet.DisconnectReason.OVERFLOW, lc.closeInfo().orElseThrow().reason());
-    }
-
-    @Test
-    void pingAnsweredWithPong() throws Exception {
-        CountDownLatch flushed = new CountDownLatch(1);
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        OutputStream sink = new OutputStream() {
-            @Override
-            public void write(int b) {
-                bytes.write(b);
-            }
-
-            @Override
-            public void flush() {
-                flushed.countDown();
-            }
-        };
-        CommandWriter w = new CommandWriter(new DataOutputStream(sink), t -> {});
-        writers.add(w);
-        w.start();
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ATTACHING);
-        CommandReceiver r = receiver(1, w);
-        handle(lc, r, Packet.ping(42));
-        assertTrue(flushed.await(WAIT_S, TimeUnit.SECONDS));
-        DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes.toByteArray()));
-        Packet reply = PacketIO.read(in, Protocol.CMD_MAX_LEN, EnumSet.allOf(PacketType.class)).orElseThrow();
-        assertEquals(PacketType.PONG, reply.type());
-        assertEquals(42, reply.seq());
-        assertFalse(lc.isClosed());
     }
 }

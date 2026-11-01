@@ -1,11 +1,9 @@
 package com.ltm.rd.client;
 
 import com.ltm.rd.common.CloseInfo;
-import com.ltm.rd.common.CommandWriter;
 import com.ltm.rd.common.Packet;
-import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.ProtocolException;
-import com.ltm.rd.common.SessionLifecycle;
+import com.ltm.rd.common.SideTx;
 import com.ltm.rd.common.Validation;
 import java.awt.Rectangle;
 import java.util.Objects;
@@ -14,20 +12,18 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Turns input packets from the Server into {@link InputCommand}s. It runs inside the session
  * transaction, so the phase check and the submit are one atomic decision;
- * {@code InputExecutor.submit} and {@code CommandWriter.offer} are the allowed non-blocking calls.
+ * {@code InputExecutor.submit} is a non-blocking call.
  */
 public final class CommandReceiver {
     private final InputExecutor input;
     private final long generation;
     private final Rectangle bounds;
-    private final CommandWriter writer;
     private final AtomicLong releaseAllReceived = new AtomicLong();
 
-    public CommandReceiver(InputExecutor input, long generation, Rectangle bounds, CommandWriter writer) {
+    public CommandReceiver(InputExecutor input, long generation, Rectangle bounds) {
         this.input = Objects.requireNonNull(input);
         this.generation = generation;
         this.bounds = new Rectangle(Objects.requireNonNull(bounds));
-        this.writer = Objects.requireNonNull(writer);
     }
 
     /** RELEASE_ALL packets accepted at the protocol level (not proof that the device released). */
@@ -35,16 +31,10 @@ public final class CommandReceiver {
         return releaseAllReceived.get();
     }
 
-    /** Handles PING and the input packets; other types are the session's business. */
-    public void handle(SessionLifecycle.Tx<ClientPhase> tx, Packet p) {
-        if (p.type() == PacketType.PING) {
-            if (writer.offer(Packet.pong(p.seq())) == CommandWriter.OfferResult.OVERFLOW) {
-                tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
-            }
-            return;
-        }
+    /** Handles input packets; other types are the session shell's business. */
+    public void handle(SideTx tx, Packet p) {
         if (tx.isClosed()) return;
-        if (tx.phase() != ClientPhase.ACTIVE) {
+        if (!tx.isActive()) {
             tx.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "input before session active", true));
             return;
         }

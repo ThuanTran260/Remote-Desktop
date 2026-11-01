@@ -250,11 +250,7 @@ public final class ServerSession implements Tickable {
             }
             switch (p.type()) {
                 case SCREEN_INFO -> port.atomically(stx -> { side.onPacket(stx, p); return null; });
-                case PING -> {
-                    if (writer != null && writer.offer(Packet.pong(p.seq())) == CommandWriter.OfferResult.OVERFLOW) {
-                        tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
-                    }
-                }
+                case PING -> port.atomically(stx -> { Heartbeat.answerPing(stx, port, p); return null; });
                 case DISCONNECT -> tx.close(new CloseInfo(p.disconnectPayload().reason(), "peer disconnected", false));
                 default -> { }
             }
