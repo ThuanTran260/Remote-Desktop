@@ -4,14 +4,16 @@ import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
-import com.ltm.rd.common.PacketType;
+import com.ltm.rd.common.PacketRules;
+import com.ltm.rd.common.PacketRules.Lane;
+import com.ltm.rd.common.PacketRules.Shell;
+import com.ltm.rd.common.PacketRules.Stage;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.common.TrafficCounter;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.util.EnumSet;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -59,7 +61,8 @@ final class HandshakeHandler {
     }
 
     private void handleCommand(PendingConnection pc, Channel ch) throws IOException {
-        Optional<Packet> first = PacketIO.read(ch.in(), Protocol.CMD_MAX_LEN, EnumSet.of(PacketType.AUTH));
+        Optional<Packet> first = PacketIO.read(ch.in(), Protocol.CMD_MAX_LEN,
+                PacketRules.allowedIn(Shell.LISTENER, Lane.COMMAND, Stage.HANDSHAKE));
         if (first.isEmpty()) return;
         Packet.AuthPayload auth = first.get().authPayload();
         InetAddress peer = ((InetSocketAddress) pc.socket().getRemoteSocketAddress()).getAddress();
@@ -85,7 +88,8 @@ final class HandshakeHandler {
     }
 
     private void handleImage(PendingConnection pc, Channel ch) throws IOException {
-        Optional<Packet> first = PacketIO.read(ch.in(), Protocol.CMD_MAX_LEN, EnumSet.of(PacketType.ATTACH));
+        Optional<Packet> first = PacketIO.read(ch.in(), Protocol.CMD_MAX_LEN,
+                PacketRules.allowedIn(Shell.LISTENER, Lane.IMAGE, Stage.HANDSHAKE));
         if (first.isEmpty()) return;
         Optional<ServerSession> current = sessions.current();
         if (current.isEmpty()) return;

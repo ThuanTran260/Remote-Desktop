@@ -8,6 +8,10 @@ import com.ltm.rd.common.Heartbeat;
 import com.ltm.rd.common.LifecyclePort;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
+import com.ltm.rd.common.PacketRules;
+import com.ltm.rd.common.PacketRules.Lane;
+import com.ltm.rd.common.PacketRules.Shell;
+import com.ltm.rd.common.PacketRules.Stage;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
@@ -24,11 +28,9 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
-import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -43,12 +45,6 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class ClientSession implements Tickable {
     private static final int IMAGE_SEND_BUFFER = 64 * 1024;
-
-    /** What the Server may send to the Client on the command channel. */
-    private static final Set<PacketType> COMMAND_IN = EnumSet.of(PacketType.SESSION_ACTIVE, PacketType.PING,
-            PacketType.PONG, PacketType.DISCONNECT, PacketType.MOUSE_MOVE, PacketType.MOUSE_PRESS,
-            PacketType.MOUSE_RELEASE, PacketType.WHEEL, PacketType.KEY_PRESS, PacketType.KEY_RELEASE,
-            PacketType.RELEASE_ALL);
 
     private final ClientConfig cfg;
     private final Timeouts timeouts;
@@ -259,7 +255,8 @@ public final class ClientSession implements Tickable {
         cmdChannel.out().flush();
         Optional<Packet> reply;
         try {
-            reply = PacketIO.read(cmdChannel.in(), Protocol.CMD_MAX_LEN, EnumSet.of(PacketType.AUTH_RESULT));
+            reply = PacketIO.read(cmdChannel.in(), Protocol.CMD_MAX_LEN,
+                    PacketRules.allowedIn(Shell.CONNECTOR, Lane.COMMAND, Stage.HANDSHAKE));
         } catch (SocketTimeoutException e) {
             lifecycle.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "auth timeout", true));
             return;
@@ -353,7 +350,8 @@ public final class ClientSession implements Tickable {
     private void readLoop(Channel ch) {
         try {
             while (true) {
-                Optional<Packet> p = PacketIO.read(ch.in(), Protocol.CMD_MAX_LEN, COMMAND_IN);
+                Optional<Packet> p = PacketIO.read(ch.in(), Protocol.CMD_MAX_LEN,
+                        PacketRules.readableAfterHandshake(Shell.CONNECTOR, Lane.COMMAND));
                 if (p.isEmpty()) {
                     lifecycle.close(new CloseInfo(Packet.DisconnectReason.USER, "peer closed command channel", false));
                     return;
@@ -374,9 +372,14 @@ public final class ClientSession implements Tickable {
         long now = cfg.nanoClock().getAsLong();
         boolean accepted = lifecycle.atomically(tx -> {
             if (tx.isClosed()) return false;
+            Stage stage = tx.phase() == ClientPhase.ATTACHING ? Stage.PENDING : Stage.ACTIVE;
+            if (!PacketRules.allows(Shell.CONNECTOR, Lane.COMMAND, stage, p.type())) {
+                tx.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "unexpected " + p.type(), true));
+                return false;
+            }
             switch (p.type()) {
                 case SESSION_ACTIVE -> {
-                    if (tx.phase() != ClientPhase.ATTACHING || activationReceived) {
+                    if (activationReceived) {
                         tx.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "unexpected SESSION_ACTIVE", true));
                         return false;
                     }

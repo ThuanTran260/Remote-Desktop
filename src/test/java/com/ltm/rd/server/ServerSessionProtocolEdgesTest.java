@@ -310,6 +310,41 @@ class ServerSessionProtocolEdgesTest {
     // ---- packets the phase table forbids -----------------------------------------------------
 
     @Test
+    void secondScreenInfoInReservedPassesRulesButClosesSession() {
+        ServerSession session = reserved(new Sink(null));
+        session.dispatch(Packet.screenInfo(1920, 1080));
+        assertEquals(ServerPhase.RESERVED, session.phase());
+
+        session.dispatch(Packet.screenInfo(1280, 720));
+
+        CloseInfo info = closeInfo(session);
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
+        assertEquals("unexpected SCREEN_INFO", info.message());
+        assertTrue(info.sendDisconnect());
+        assertTrue(session.activeAtNanos().isEmpty());
+        assertEquals(ServerPhase.CLOSING, session.phase());
+        assertEquals(new Packet.SizePayload(1920, 1080), session.screen().orElseThrow());
+    }
+
+    @Test
+    void neverValidCommandTypeIsRejectedByTheReader() throws Exception {
+        ServerSession session = newSession();
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        PacketIO.write(new DataOutputStream(bytes), Packet.mouseMove(1, 1));
+        PendingConnection pc = new PendingConnection(new Socket(), 0);
+        Channel channel = new Channel(pc.socket(), new DataInputStream(new ByteArrayInputStream(bytes.toByteArray())),
+                new DataOutputStream(new Sink(null)));
+        assertTrue(session.attachCommandChannel(pc, channel, 0));
+
+        session.terminated().get(WAIT_S, TimeUnit.SECONDS);
+
+        CloseInfo info = closeInfo(session);
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
+        assertEquals("protocol violation", info.message());
+        assertTrue(info.sendDisconnect());
+    }
+
+    @Test
     void packetTypeOutsideTheCommandTableClosesWithProtocolError() throws Exception {
         Sink sink = new Sink(null);
         ServerSession session = reserved(sink);

@@ -369,6 +369,62 @@ class ClientSessionHandshakeEdgesTest {
     // ---- SESSION_ACTIVE out of turn ------------------------------------------------------------------
 
     @Test
+    void v1CloseMessagesSurviveTheRulesTable() throws Exception {
+        RawPeer.Server pendingServer = rawServer();
+        ClientSession pending = client(pendingServer);
+        pending.start();
+        RawPeer pendingCmd = attaching(pendingServer);
+        assertEquals(ClientPhase.ATTACHING, pending.phase());
+
+        pendingCmd.send(Packet.keyPress(65));
+
+        awaitTerminated(pending);
+        CloseInfo pendingInfo = closeInfo(pending);
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, pendingInfo.reason());
+        assertEquals("input before session active", pendingInfo.message());
+        assertTrue(pendingInfo.sendDisconnect());
+        assertEquals(0, pending.inputBeginCount());
+        Packet pendingDisconnect = pendingCmd.readUntil(PacketType.DISCONNECT);
+        assertEquals("input before session active", pendingDisconnect.disconnectPayload().message());
+
+        RawPeer.Server activeServer = rawServer();
+        ClientSession active = client(activeServer);
+        active.start();
+        RawPeer activeCmd = attaching(activeServer);
+        activeCmd.send(Packet.sessionActive());
+        active.activated().get(WAIT_S, TimeUnit.SECONDS);
+        assertEquals(ClientPhase.ACTIVE, active.phase());
+
+        activeCmd.send(Packet.sessionActive());
+
+        awaitTerminated(active);
+        CloseInfo activeInfo = closeInfo(active);
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, activeInfo.reason());
+        assertEquals("unexpected SESSION_ACTIVE", activeInfo.message());
+        assertTrue(activeInfo.sendDisconnect());
+        assertEquals(1, active.inputBeginCount());
+        Packet activeDisconnect = activeCmd.readUntil(PacketType.DISCONNECT);
+        assertEquals("unexpected SESSION_ACTIVE", activeDisconnect.disconnectPayload().message());
+    }
+
+    @Test
+    void neverValidCommandTypeIsRejectedByTheReader() throws Exception {
+        RawPeer.Server rs = rawServer();
+        ClientSession c = client(rs);
+        c.start();
+        RawPeer cmd = attaching(rs);
+
+        cmd.send(Packet.screenInfo(1280, 720));
+
+        awaitTerminated(c);
+        CloseInfo info = closeInfo(c);
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
+        assertEquals("protocol violation", info.message());
+        assertTrue(info.sendDisconnect());
+        assertEquals(0, c.inputBeginCount());
+    }
+
+    @Test
     void secondSessionActiveWhileAttachingIsAProtocolViolation() throws Exception {
         RawPeer.Server rs = rawServer();
         HeldHook afterAttach = new HeldHook();

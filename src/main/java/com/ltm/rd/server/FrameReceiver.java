@@ -4,7 +4,10 @@ import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
-import com.ltm.rd.common.PacketType;
+import com.ltm.rd.common.PacketRules;
+import com.ltm.rd.common.PacketRules.Lane;
+import com.ltm.rd.common.PacketRules.Shell;
+import com.ltm.rd.common.PacketRules.Stage;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
 import com.ltm.rd.common.SessionPort;
@@ -13,7 +16,6 @@ import java.io.IOException;
 import java.net.SocketTimeoutException;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.function.LongSupplier;
 
 /**
@@ -22,8 +24,6 @@ import java.util.function.LongSupplier;
  * unexpected RuntimeException, is a protocol error. Image content is never logged.
  */
 final class FrameReceiver implements Runnable {
-    private static final Set<PacketType> FRAME_ONLY = Set.of(PacketType.FRAME);
-
     private final SessionPort port;
     private final ControlSide target;
     private final Channel img;
@@ -47,7 +47,8 @@ final class FrameReceiver implements Runnable {
     public void run() {
         try {
             while (true) {
-                Optional<Packet> p = PacketIO.read(img.in(), Protocol.IMG_MAX_LEN, FRAME_ONLY);
+                Optional<Packet> p = PacketIO.read(img.in(), Protocol.IMG_MAX_LEN,
+                        PacketRules.allowedIn(Shell.LISTENER, Lane.IMAGE, Stage.ACTIVE));
                 if (p.isEmpty()) {
                     close(Packet.DisconnectReason.USER, "peer closed image channel", false);
                     return;

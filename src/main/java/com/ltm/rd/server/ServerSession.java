@@ -7,6 +7,10 @@ import com.ltm.rd.common.Heartbeat;
 import com.ltm.rd.common.LifecyclePort;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
+import com.ltm.rd.common.PacketRules;
+import com.ltm.rd.common.PacketRules.Lane;
+import com.ltm.rd.common.PacketRules.Shell;
+import com.ltm.rd.common.PacketRules.Stage;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
@@ -23,11 +27,9 @@ import java.net.InetAddress;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.security.MessageDigest;
-import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
@@ -58,10 +60,6 @@ public final class ServerSession implements Tickable {
             return new Env(Timeouts.DEFAULTS, System::nanoTime, null, () -> false, null);
         }
     }
-
-    /** What the Client may send to the Server on the command channel. */
-    private static final Set<PacketType> COMMAND_IN = EnumSet.of(PacketType.SCREEN_INFO, PacketType.PING,
-            PacketType.PONG, PacketType.DISCONNECT);
 
     private final long generation;
     private final byte[] token;
@@ -216,7 +214,8 @@ public final class ServerSession implements Tickable {
     private void readLoop(Channel ch) {
         try {
             while (true) {
-                Optional<Packet> p = PacketIO.read(ch.in(), Protocol.CMD_MAX_LEN, COMMAND_IN);
+                Optional<Packet> p = PacketIO.read(ch.in(), Protocol.CMD_MAX_LEN,
+                        PacketRules.readableAfterHandshake(Shell.LISTENER, Lane.COMMAND));
                 if (p.isEmpty()) {
                     lifecycle.close(new CloseInfo(Packet.DisconnectReason.USER, "peer closed command channel", false));
                     return;
@@ -238,13 +237,8 @@ public final class ServerSession implements Tickable {
         long now = env.clock().getAsLong();
         boolean accepted = lifecycle.atomically(tx -> {
             if (tx.isClosed()) return false;
-            ServerPhase phase = tx.phase();
-            boolean allowed = switch (p.type()) {
-                case SCREEN_INFO -> phase == ServerPhase.RESERVED;
-                case PING, PONG, DISCONNECT -> phase == ServerPhase.RESERVED || phase == ServerPhase.ACTIVE;
-                default -> false;
-            };
-            if (!allowed) {
+            Stage stage = tx.phase() == ServerPhase.RESERVED ? Stage.PENDING : Stage.ACTIVE;
+            if (!PacketRules.allows(Shell.LISTENER, Lane.COMMAND, stage, p.type())) {
                 tx.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "unexpected " + p.type(), true));
                 return false;
             }
