@@ -75,6 +75,8 @@ Giới hạn: receipt launch và model trong projection không chứng minh mode
 
 Bằng chứng thô gồm ledger, launch/release receipts, báo cáo worker/reviewer, log verify và CSV JaCoCo đã được sao lưu local vào `.superpowers/evidence/run_c4af214b4a8d/`, được bỏ qua bằng `.git/info/exclude` riêng của checkout. Khi dọn workspace SDD tạm, coordinator đối chiếu toàn bộ tên file và SHA-256 với bản lưu; các đường dẫn artifact lịch sử trong báo cáo review/audit tra tại thư mục này. Lịch sử commit, báo cáo nghiệm thu, review cuối và audit nguồn gốc là bản ghi trong Git. Run không còn Dispatch active hay terminal reclaimable; bốn terminal người dùng tiếp quản được giữ, mười bốn terminal đã release.
 
+Thư mục SDD tạm vẫn được giữ: hệ thống duyệt tự động từ chối thao tác xóa với thông báo `blocked by policy`. Coordinator hoàn tất sao lưu và kiểm hash bằng thao tác chỉ sao chép; không thử lại việc xóa bằng cách khác. Đây là phần cleanup còn lại, không phải finding về code hoặc gate kiểm chứng bị thiếu.
+
 ## Coordinator rulings (exhaustive ledger extract)
 
 Ordered ledger entries; later user instructions supersede historical routing.
