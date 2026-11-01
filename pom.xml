@@ -106,6 +106,7 @@
                   <element>CLASS</element>
                   <includes>
                     <include>com.ltm.rd.server.ServerSession</include>
+                    <include>com.ltm.rd.server.ControlSide</include>
                     <include>com.ltm.rd.client.ClientSession</include>
                     <include>com.ltm.rd.server.HandshakeHandler</include>
                   </includes>

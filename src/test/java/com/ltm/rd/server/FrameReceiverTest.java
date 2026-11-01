@@ -68,7 +68,7 @@ class FrameReceiverTest {
     }
 
     private static CloseInfo run(ServerSession session, byte[] bytes, FrameDecoder decoder) {
-        new FrameReceiver(session, channelOver(bytes), decoder, 1920, 1080, System::nanoTime).run();
+        new FrameReceiver(session.port(), session.controlSide(), channelOver(bytes), decoder, 1920, 1080, System::nanoTime).run();
         return session.lifecycle().closeInfo().orElseThrow();
     }
 

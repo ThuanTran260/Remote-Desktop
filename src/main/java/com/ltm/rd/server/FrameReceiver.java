@@ -7,6 +7,7 @@ import com.ltm.rd.common.PacketIO;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
+import com.ltm.rd.common.SessionPort;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.net.SocketTimeoutException;
@@ -23,16 +24,18 @@ import java.util.function.LongSupplier;
 final class FrameReceiver implements Runnable {
     private static final Set<PacketType> FRAME_ONLY = Set.of(PacketType.FRAME);
 
-    private final ServerSession session;
+    private final SessionPort port;
+    private final ControlSide target;
     private final Channel img;
     private final FrameDecoder decoder;
     private final int screenWidth;
     private final int screenHeight;
     private final LongSupplier clock;
 
-    FrameReceiver(ServerSession session, Channel img, FrameDecoder decoder, int screenWidth, int screenHeight,
-            LongSupplier clock) {
-        this.session = Objects.requireNonNull(session);
+    FrameReceiver(SessionPort port, ControlSide target, Channel img, FrameDecoder decoder, int screenWidth,
+            int screenHeight, LongSupplier clock) {
+        this.port = Objects.requireNonNull(port);
+        this.target = Objects.requireNonNull(target);
         this.img = Objects.requireNonNull(img);
         this.decoder = Objects.requireNonNull(decoder);
         this.screenWidth = screenWidth;
@@ -50,8 +53,8 @@ final class FrameReceiver implements Runnable {
                     return;
                 }
                 BufferedImage image = decoder.decode(p.get().framePayload(), screenWidth, screenHeight);
-                session.publishFrame(session.generation(), image, clock.getAsLong());
-                if (session.lifecycle().isClosed()) return;
+                target.publishFrame(port.generation(), image, clock.getAsLong());
+                if (port.isClosed()) return;
             }
         } catch (SocketTimeoutException e) {
             close(Packet.DisconnectReason.TIMEOUT, "image read timeout", true);
@@ -65,6 +68,6 @@ final class FrameReceiver implements Runnable {
     }
 
     private void close(Packet.DisconnectReason reason, String message, boolean sendDisconnect) {
-        session.lifecycle().close(new CloseInfo(reason, message, sendDisconnect));
+        port.close(new CloseInfo(reason, message, sendDisconnect));
     }
 }

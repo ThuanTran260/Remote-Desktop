@@ -4,12 +4,14 @@ import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.CommandWriter;
 import com.ltm.rd.common.Heartbeat;
+import com.ltm.rd.common.LifecyclePort;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
 import com.ltm.rd.common.SessionLifecycle;
+import com.ltm.rd.common.SessionPort;
 import com.ltm.rd.common.Tickable;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
@@ -27,8 +29,6 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
@@ -73,19 +73,11 @@ public final class ServerSession implements Tickable {
     // guarded by the lifecycle lock (read and written only inside atomically)
     private Channel cmdChannel;
     private CommandWriter writer;
-    private Packet.SizePayload screen;
     private Channel imageChannel;
 
-    private FrameMonitor monitor; // set when the session turns ACTIVE
-    private BufferedImage latestFrame;
-    private long framesReceived;
-    private long releaseAllSent;
-    private long controlReleasesSent;
-
-    private volatile long activeAtNanos;
-    private volatile boolean framesExpected; // cheap pre-check for the ticker; true once ACTIVE
+    private final SessionPort port;
+    private final ControlSide side;
     private volatile Heartbeat heartbeat;
-    private final CopyOnWriteArrayList<ObserverSlot> observers = new CopyOnWriteArrayList<>();
 
     ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
             SessionLifecycle<ServerPhase> lifecycle) {
@@ -100,6 +92,15 @@ public final class ServerSession implements Tickable {
         this.reservedAtNanos = reservedAtNanos;
         this.lifecycle = Objects.requireNonNull(lifecycle);
         this.env = Objects.requireNonNull(env);
+        this.port = new LifecyclePort<>(lifecycle, generation, env.ticker(), env.clock(),
+                new LifecyclePort.Shell<>() {
+                    @Override public boolean isActive(ServerPhase phase) { return phase == ServerPhase.ACTIVE; }
+                    @Override public boolean isActivationPending(ServerPhase phase) { return phase == ServerPhase.RESERVED; }
+                    @Override public boolean activationExpired(long now) { return reserveExpired(now); }
+                    @Override public CommandWriter writer() { return writer; }
+                    @Override public void tryActivate(SessionLifecycle.Tx<ServerPhase> tx) { maybeActivate(tx); }
+                });
+        this.side = new ControlSide(port, env.timeouts(), env.clock(), env.receiveFrames());
     }
 
     public long generation() {
@@ -129,7 +130,7 @@ public final class ServerSession implements Tickable {
 
     /** The Client screen size once SCREEN_INFO arrived. */
     public Optional<Packet.SizePayload> screen() {
-        return lifecycle.atomically(tx -> Optional.ofNullable(screen));
+        return side.screen();
     }
 
     // ---- reserve deadline ------------------------------------------------------------------
@@ -137,15 +138,7 @@ public final class ServerSession implements Tickable {
     /** Closes the session if it is still RESERVED when the reserve window has passed. */
     @Override
     public void tick(long nowNanos) {
-        if (framesExpected) {
-            // the monitor decision and its consequence (gate, RELEASE_ALL, timeout) are one transaction
-            lifecycle.atomically(tx -> {
-                if (!tx.isClosed() && tx.phase() == ServerPhase.ACTIVE && monitor != null) {
-                    handleTransition(tx, monitor.onTick(nowNanos));
-                }
-                return null;
-            });
-        } else if (reserveExpired(nowNanos)) {
+        if (!side.tick(nowNanos) && reserveExpired(nowNanos)) {
             lifecycle.closeIf(ServerPhase.RESERVED, new CloseInfo(Packet.DisconnectReason.TIMEOUT, "attach timeout", true));
         }
     }
@@ -189,6 +182,7 @@ public final class ServerSession implements Tickable {
             tx.after(() -> w.start(lifecycle::startWorker));
             tx.after(() -> lifecycle.startWorker("rd-cmd-reader", () -> readLoop(ch)));
             tx.after(() -> registerTickables(hb, dog));
+            port.atomically(stx -> { side.onAuthenticated(stx); return null; });
             maybeActivate(tx);
             return true;
         });
@@ -246,7 +240,7 @@ public final class ServerSession implements Tickable {
             if (tx.isClosed()) return false;
             ServerPhase phase = tx.phase();
             boolean allowed = switch (p.type()) {
-                case SCREEN_INFO -> phase == ServerPhase.RESERVED && screen == null;
+                case SCREEN_INFO -> phase == ServerPhase.RESERVED;
                 case PING, PONG, DISCONNECT -> phase == ServerPhase.RESERVED || phase == ServerPhase.ACTIVE;
                 default -> false;
             };
@@ -255,10 +249,7 @@ public final class ServerSession implements Tickable {
                 return false;
             }
             switch (p.type()) {
-                case SCREEN_INFO -> {
-                    screen = p.sizePayload();
-                    maybeActivate(tx);
-                }
+                case SCREEN_INFO -> port.atomically(stx -> { side.onPacket(stx, p); return null; });
                 case PING -> {
                     if (writer != null && writer.offer(Packet.pong(p.seq())) == CommandWriter.OfferResult.OVERFLOW) {
                         tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
@@ -312,13 +303,15 @@ public final class ServerSession implements Tickable {
      * timestamp the caller took before it waited for the lock.
      */
     private void maybeActivate(SessionLifecycle.Tx<ServerPhase> tx) {
-        if (writer == null || screen == null || imageChannel == null) return;
+        if (writer == null || !side.readyForActive() || imageChannel == null) return;
         if (tx.isClosed() || tx.phase() != ServerPhase.RESERVED) return;
         long activationNanos = env.clock().getAsLong();
         if (reserveExpired(activationNanos)) return;
         switch (writer.offer(Packet.sessionActive())) {
             case ACCEPTED -> {
-                if (tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE)) onActive(tx, activationNanos);
+                if (tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE)) {
+                    port.atomically(stx -> side.onActive(stx, activationNanos, imageChannel));
+                }
             }
             case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
             default -> { } // CLOSED or COALESCED: the session is already going away
@@ -327,163 +320,25 @@ public final class ServerSession implements Tickable {
 
     // ---- frames and the control gate ---------------------------------------------------------
 
-    /** Inside the activation transaction: start the frame monitor and, after unlock, the receiver. */
-    private void onActive(SessionLifecycle.Tx<ServerPhase> tx, long now) {
-        monitor = new FrameMonitor(now, env.timeouts().frameStall(), env.timeouts().frameTimeout());
-        activeAtNanos = now;
-        framesExpected = true;
-        if (env.receiveFrames()) {
-            FrameReceiver receiver = new FrameReceiver(this, imageChannel, new FrameDecoder(), screen.width(),
-                    screen.height(), env.clock());
-            tx.after(() -> lifecycle.startWorker("rd-frame-receiver", receiver));
-        }
-    }
-
-    /**
-     * A decoded frame from the receiver. A frame of another generation, for a closed session, or
-     * after the frame timeout was decided is dropped; the monitor decision and its consequence
-     * share one transaction with the tick, so exactly one of frame and timeout wins.
-     */
     void publishFrame(long frameGeneration, BufferedImage image, long now) {
-        lifecycle.atomically(tx -> {
-            if (frameGeneration != generation || tx.isClosed() || tx.phase() != ServerPhase.ACTIVE || monitor == null) {
-                return null;
-            }
-            FrameMonitor.Transition t = monitor.onFrame(now);
-            if (t == FrameMonitor.Transition.TIMEOUT) {
-                tx.closeIf(ServerPhase.ACTIVE, frameTimeout()); // dropped: the session is closing
-                return null;
-            }
-            latestFrame = image;
-            framesReceived++;
-            handleTransition(tx, t);
-            return null;
-        });
+        side.publishFrame(frameGeneration, image, now);
     }
 
-    private static CloseInfo frameTimeout() {
-        return new CloseInfo(Packet.DisconnectReason.TIMEOUT, "frame timeout", true);
-    }
+    public boolean controlEnabled() { return side.controlEnabled(); }
+    public CommandWriter.OfferResult offerInput(Packet p) { return side.offerInput(p); }
+    public InputOutcome offerInput(long inputEpoch, Packet p) { return side.offerInput(inputEpoch, p); }
+    public CommandWriter.OfferResult releaseControlInput() { return side.releaseControlInput(); }
+    public long controlReleasesSent() { return side.controlReleasesSent(); }
+    public long inputEpoch() { return side.inputEpoch(); }
 
-    /** Inside the transaction that produced {@code t}: no input can slip in between gate and RELEASE_ALL. */
-    private void handleTransition(SessionLifecycle.Tx<ServerPhase> tx, FrameMonitor.Transition t) {
-        if (t == FrameMonitor.Transition.NONE) return;
-        long revision = monitor.revision();
-        switch (t) {
-            case STALL_START -> { // the gate is now closed (monitor.stalled()); release whatever the Client holds
-                switch (writer.offer(Packet.releaseAll())) {
-                    case ACCEPTED -> releaseAllSent++;
-                    case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW,
-                            "command queue overflow", true));
-                    default -> { }
-                }
-            }
-            case TIMEOUT -> tx.closeIf(ServerPhase.ACTIVE, frameTimeout());
-            default -> { } // STALL_END: the gate opens by itself
-        }
-        for (ObserverSlot slot : observers) slot.queue.add(new Notification(revision, t)); // order = transaction order
-        tx.after(this::drainObservers);
-    }
-
-    /** True once ACTIVE, a first frame arrived, no stall is in progress and the session is open. */
-    public boolean controlEnabled() {
-        return lifecycle.atomically(tx -> gateOpen(tx));
-    }
-
-    private boolean gateOpen(SessionLifecycle.Tx<ServerPhase> tx) {
-        return !tx.isClosed() && tx.phase() == ServerPhase.ACTIVE && monitor != null && monitor.hasFrame()
-                && !monitor.stalled();
-    }
-
-    /**
-     * Queues an input packet for the Client. The gate check and the offer are one transaction, so
-     * an input can never be queued after the stall decision that closed the gate; with the gate
-     * closed the result is CLOSED.
-     */
-    public CommandWriter.OfferResult offerInput(Packet p) {
-        requireInputPacket(p);
-        return lifecycle.atomically(tx -> {
-            if (!gateOpen(tx) || writer == null) return CommandWriter.OfferResult.CLOSED;
-            CommandWriter.OfferResult result = writer.offer(p);
-            if (result == CommandWriter.OfferResult.OVERFLOW) {
-                tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
-            }
-            return result;
-        });
-    }
-
-    /**
-     * Like {@link #offerInput(Packet)} but for the frame the user saw: gate, then epoch, then the
-     * offer, all in one transaction. During a stall the result is GATE_CLOSED; after the stall ended
-     * an old epoch is STALE_EPOCH, so input aimed at an earlier picture is never sent.
-     */
-    public InputOutcome offerInput(long inputEpoch, Packet p) {
-        requireInputPacket(p);
-        return lifecycle.atomically(tx -> {
-            if (!gateOpen(tx) || writer == null) return InputOutcome.GATE_CLOSED;
-            if (inputEpoch != monitor.revision()) return InputOutcome.STALE_EPOCH;
-            switch (writer.offer(p)) {
-                case OVERFLOW -> {
-                    tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
-                    return InputOutcome.OVERFLOW;
-                }
-                case CLOSED -> {
-                    return InputOutcome.GATE_CLOSED;
-                }
-                default -> {
-                    return InputOutcome.SENT; // ACCEPTED, or a mouse move coalesced into the queued one
-                }
-            }
-        });
-    }
-
-    private static void requireInputPacket(Packet p) {
-        switch (p.type()) {
-            case MOUSE_MOVE, MOUSE_PRESS, MOUSE_RELEASE, WHEEL, KEY_PRESS, KEY_RELEASE -> { }
-            default -> throw new IllegalArgumentException("not an input packet: " + p.type());
-        }
-    }
-
-    /**
-     * Asks the Client to release everything it holds (focus lost, user disconnect). Independent of
-     * the frame gate: while frames stall this is exactly when it is needed. CLOSED when the session
-     * is closed or not ACTIVE; a full queue closes the session with OVERFLOW.
-     */
-    public CommandWriter.OfferResult releaseControlInput() {
-        return lifecycle.atomically(tx -> {
-            if (tx.isClosed() || tx.phase() != ServerPhase.ACTIVE || writer == null) {
-                return CommandWriter.OfferResult.CLOSED;
-            }
-            CommandWriter.OfferResult result = writer.offer(Packet.releaseAll());
-            switch (result) {
-                case ACCEPTED -> controlReleasesSent++;
-                case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW,
-                        "command queue overflow", true));
-                default -> { }
-            }
-            return result;
-        });
-    }
-
-    /** RELEASE_ALL packets the command writer accepted on request of {@link #releaseControlInput()}. */
-    public long controlReleasesSent() {
-        return lifecycle.atomically(tx -> controlReleasesSent);
-    }
-
-    /**
-     * The input epoch: the frame monitor's revision, 0 before the session is ACTIVE. It changes on
-     * every stall start, stall end and timeout, so any change means "the picture the user aimed at
-     * is gone".
-     */
-    public long inputEpoch() {
-        return lifecycle.atomically(tx -> monitor == null ? 0 : monitor.revision());
-    }
-
-    /** Gate, epoch, latest frame and frame count read in one transaction. */
+    /** Gate, epoch, latest frame and frame count read under the same lifecycle lock. */
     public ControlView controlView() {
-        return lifecycle.atomically(tx -> new ControlView(generation, tx.phase(), gateOpen(tx),
-                monitor == null ? 0 : monitor.revision(), latestFrame, framesReceived));
+        return lifecycle.atomically(tx -> new ControlView(generation, tx.phase(), side.controlEnabled(),
+                side.inputEpoch(), side.latestFrame().orElse(null), side.framesReceived()));
     }
+
+    SessionPort port() { return port; }
+    ControlSide controlSide() { return side; }
 
     // ---- close, observability for the UI ------------------------------------------------------
 
@@ -521,73 +376,9 @@ public final class ServerSession implements Tickable {
                 imageChannel == null ? 0 : imageChannel.traffic().bytesOut()));
     }
 
-    public Optional<BufferedImage> latestFrame() {
-        return lifecycle.atomically(tx -> Optional.ofNullable(latestFrame));
-    }
-
-    /** The instant the session turned ACTIVE, from the session clock; empty before that. */
-    public java.util.OptionalLong activeAtNanos() {
-        return framesExpected ? java.util.OptionalLong.of(activeAtNanos) : java.util.OptionalLong.empty();
-    }
-
-    public long framesReceived() {
-        return lifecycle.atomically(tx -> framesReceived);
-    }
-
-    /** RELEASE_ALL packets the command writer accepted because of a stall. */
-    public long releaseAllSent() {
-        return lifecycle.atomically(tx -> releaseAllSent);
-    }
-
-    /** For UI and tests; called outside the session lock. */
-    @FunctionalInterface
-    public interface FrameObserver {
-        void onChange(long revision, FrameMonitor.Transition transition);
-    }
-
-   private record Notification(long revision, FrameMonitor.Transition transition) {}
-
-    private static final class ObserverSlot {
-        final FrameObserver observer;
-        final java.util.Queue<Notification> queue = new java.util.concurrent.ConcurrentLinkedQueue<>();
-        final java.util.concurrent.atomic.AtomicBoolean draining = new java.util.concurrent.atomic.AtomicBoolean();
-
-        ObserverSlot(FrameObserver observer) {
-            this.observer = observer;
-        }
-    }
-
-    /** Observers registered later only see later transitions. */
-    public void addFrameObserver(FrameObserver observer) {
-        observers.add(new ObserverSlot(Objects.requireNonNull(observer)));
-    }
-
-    /**
-     * Delivers queued notifications outside the lock. Notifications are queued inside the
-     * transaction, so their order is the transaction order; a single drainer per observer
-     * delivers them one at a time, so a later transition can never overtake an earlier one even
-     * when the earlier delivery is slow.
-     */
-    private void drainObservers() {
-        for (ObserverSlot slot : observers) drain(slot);
-    }
-
-    private static void drain(ObserverSlot slot) {
-        while (true) {
-            if (!slot.draining.compareAndSet(false, true)) return; // the current drainer will see our entry
-            try {
-                Notification n;
-                while ((n = slot.queue.poll()) != null) {
-                    try {
-                        slot.observer.onChange(n.revision(), n.transition());
-                    } catch (RuntimeException e) {
-                        // an observer must not break the session
-                    }
-                }
-            } finally {
-                slot.draining.set(false);
-            }
-            if (slot.queue.isEmpty()) return; // else an entry arrived between the last poll and the release: go again
-        }
-    }
+    public Optional<BufferedImage> latestFrame() { return side.latestFrame(); }
+    public OptionalLong activeAtNanos() { return side.activeAtNanos(); }
+    public long framesReceived() { return side.framesReceived(); }
+    public long releaseAllSent() { return side.releaseAllSent(); }
+    public void addFrameObserver(ControlSide.FrameObserver observer) { side.addFrameObserver(observer); }
 }
