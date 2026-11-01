@@ -3,8 +3,8 @@ package com.ltm.rd.ui;
 import static com.ltm.rd.ui.RuntimeTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.FakeInputDevice;
-import com.ltm.rd.client.FakeScreenSource;
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
 import com.ltm.rd.common.FakeClock;
 import com.ltm.rd.common.Packet;
 import java.awt.event.InputEvent;

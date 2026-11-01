@@ -1,5 +1,10 @@
 package com.ltm.rd.client;
 
+import com.ltm.rd.host.ControlledSide;
+import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.host.ScreenGeometry;
+import com.ltm.rd.host.ScreenSource;
+
 import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.ClosedSessionException;

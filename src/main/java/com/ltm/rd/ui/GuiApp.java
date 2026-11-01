@@ -2,7 +2,7 @@ package com.ltm.rd.ui;
 
 import com.ltm.rd.Launcher;
 import com.ltm.rd.LaunchOptions;
-import com.ltm.rd.client.RobotAdapterFactory;
+import com.ltm.rd.host.RobotAdapterFactory;
 import java.awt.EventQueue;
 import java.util.List;
 import javax.swing.JOptionPane;

@@ -2,7 +2,7 @@ package com.ltm.rd.ui;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.AdapterException;
+import com.ltm.rd.host.AdapterException;
 import com.ltm.rd.common.Packet;
 import java.net.BindException;
 import java.net.ConnectException;

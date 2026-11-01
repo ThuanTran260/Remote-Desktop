@@ -4,10 +4,10 @@ import static com.ltm.rd.ui.RuntimeTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.ltm.rd.LaunchOptions;
-import com.ltm.rd.client.AdapterException;
+import com.ltm.rd.host.AdapterException;
 import com.ltm.rd.client.ClientHooks;
 import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.client.InputExecutor;
+import com.ltm.rd.host.InputExecutor;
 import com.ltm.rd.client.SocketConnector;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.server.ServerCore;
@@ -383,7 +383,7 @@ class AppRuntimeClientTest {
         AppRuntime rt = client(core.cmdPort(), core.imgPort(), adapters, AppRuntime.Seams.none(), clock);
         connectActive(rt, core);
         holdKey(core, adapters, 17);
-        com.ltm.rd.client.FakeInputDevice.Gate releaseGate = adapters.device.blockOn("keyRelease:17");
+        com.ltm.rd.host.FakeInputDevice.Gate releaseGate = adapters.device.blockOn("keyRelease:17");
         ClientSession cs = session(rt);
 
         assertTrue(rt.disconnect());

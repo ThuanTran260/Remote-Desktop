@@ -1,5 +1,11 @@
 package com.ltm.rd.client;
 
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
+import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.host.ScreenGeometry;
+import com.ltm.rd.host.ScreenSource;
+
 import static com.ltm.rd.common.FakeClock.s;
 import static org.junit.jupiter.api.Assertions.*;
 

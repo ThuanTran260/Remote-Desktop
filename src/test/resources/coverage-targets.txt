@@ -1,5 +1,5 @@
 com.ltm.rd.server.ServerSession
-com.ltm.rd.server.ControlSide
+com.ltm.rd.viewer.ControlSide
 com.ltm.rd.client.ClientSession
-com.ltm.rd.client.ControlledSide
+com.ltm.rd.host.ControlledSide
 com.ltm.rd.server.HandshakeHandler

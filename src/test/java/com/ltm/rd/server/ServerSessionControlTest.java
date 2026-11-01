@@ -1,14 +1,17 @@
 package com.ltm.rd.server;
 
+import com.ltm.rd.viewer.ControlView;
+import com.ltm.rd.viewer.InputOutcome;
+
 import static com.ltm.rd.common.FakeClock.s;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.ltm.rd.client.ClientConfig;
 import com.ltm.rd.client.ClientHooks;
 import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.client.FakeInputDevice;
-import com.ltm.rd.client.FakeScreenSource;
-import com.ltm.rd.client.InputExecutor;
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
+import com.ltm.rd.host.InputExecutor;
 import com.ltm.rd.client.SocketConnector;
 import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;

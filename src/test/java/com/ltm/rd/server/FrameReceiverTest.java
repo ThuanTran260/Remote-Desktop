@@ -1,8 +1,12 @@
 package com.ltm.rd.server;
 
+import com.ltm.rd.viewer.DelegatingImageReader;
+import com.ltm.rd.viewer.FrameDecoder;
+import com.ltm.rd.viewer.FrameReceiver;
+
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.FrameEncoder;
+import com.ltm.rd.host.FrameEncoder;
 import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;

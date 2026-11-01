@@ -1,11 +1,11 @@
 package com.ltm.rd.spike;
 
-import com.ltm.rd.client.InputCommand;
-import com.ltm.rd.client.InputDevice;
-import com.ltm.rd.client.InputExecutor;
-import com.ltm.rd.client.RobotAdapterFactory;
-import com.ltm.rd.client.ScreenGeometry;
-import com.ltm.rd.client.ScreenSource;
+import com.ltm.rd.host.InputCommand;
+import com.ltm.rd.host.InputDevice;
+import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.host.RobotAdapterFactory;
+import com.ltm.rd.host.ScreenGeometry;
+import com.ltm.rd.host.ScreenSource;
 import com.ltm.rd.common.Validation;
 import java.awt.BorderLayout;
 import java.awt.Color;

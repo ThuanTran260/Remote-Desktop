@@ -1,11 +1,11 @@
 package com.ltm.rd.ui;
 
-import com.ltm.rd.client.AdapterException;
-import com.ltm.rd.client.AdapterFactory;
-import com.ltm.rd.client.FakeInputDevice;
-import com.ltm.rd.client.FakeScreenSource;
-import com.ltm.rd.client.InputDevice;
-import com.ltm.rd.client.ScreenSource;
+import com.ltm.rd.host.AdapterException;
+import com.ltm.rd.host.AdapterFactory;
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
+import com.ltm.rd.host.InputDevice;
+import com.ltm.rd.host.ScreenSource;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;

@@ -2,7 +2,7 @@ package com.ltm.rd.server;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.FrameEncoder;
+import com.ltm.rd.host.FrameEncoder;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketType;

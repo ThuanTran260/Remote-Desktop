@@ -1,7 +1,7 @@
 package com.ltm.rd.spike;
 
 import com.ltm.rd.LaunchOptions;
-import com.ltm.rd.client.RobotAdapterFactory;
+import com.ltm.rd.host.RobotAdapterFactory;
 import com.ltm.rd.ui.AppConfig;
 import com.ltm.rd.ui.AppRuntime;
 import com.ltm.rd.ui.ConnectOutcome;
