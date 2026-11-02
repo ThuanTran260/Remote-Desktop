@@ -104,6 +104,8 @@ public final class AppRuntime implements Controller {
     private final LaunchOptions.Role role;
     private final AppConfig cfg;
     private final Seams seams;
+    private final Runnable afterHostSnapshotProjection;
+    private final Runnable beforeHostDisconnectClose;
     private final AdapterFactory adapters; // null for the Viewer
     private final Object lock = new Object();
     private final ExecutorService app = Executors.newSingleThreadExecutor(daemonFactory("rd-app", false));
@@ -130,9 +132,16 @@ public final class AppRuntime implements Controller {
 
     private AppRuntime(LaunchOptions.Role role, AppConfig cfg, AdapterFactory adapters, Seams seams)
             throws AdapterException {
+        this(role, cfg, adapters, seams, () -> { }, () -> { });
+    }
+
+    private AppRuntime(LaunchOptions.Role role, AppConfig cfg, AdapterFactory adapters, Seams seams,
+            Runnable afterHostSnapshotProjection, Runnable beforeHostDisconnectClose) throws AdapterException {
         this.role = role;
         this.cfg = Objects.requireNonNull(cfg);
         this.seams = Objects.requireNonNull(seams);
+        this.afterHostSnapshotProjection = Objects.requireNonNull(afterHostSnapshotProjection);
+        this.beforeHostDisconnectClose = Objects.requireNonNull(beforeHostDisconnectClose);
         this.adapters = adapters;
         if (role == LaunchOptions.Role.HOST) {
             InputDevice device = Objects.requireNonNull(adapters).inputDevice();
@@ -167,6 +176,14 @@ public final class AppRuntime implements Controller {
 
     static AppRuntime forHost(AppConfig cfg, AdapterFactory adapters, Seams seams) throws AdapterException {
         return new AppRuntime(LaunchOptions.Role.HOST, cfg, Objects.requireNonNull(adapters), seams);
+    }
+
+    static AppRuntime forHost(AppConfig cfg, AdapterFactory adapters, Seams seams,
+            Runnable afterHostSnapshotProjection, Runnable beforeHostDisconnectClose) throws AdapterException {
+        Objects.requireNonNull(afterHostSnapshotProjection);
+        Objects.requireNonNull(beforeHostDisconnectClose);
+        return new AppRuntime(LaunchOptions.Role.HOST, cfg, Objects.requireNonNull(adapters), seams,
+                afterHostSnapshotProjection, beforeHostDisconnectClose);
     }
 
     public static AppRuntime forViewer(AppConfig cfg) { return forViewer(cfg, Seams.none()); }
@@ -432,9 +449,8 @@ public final class AppRuntime implements Controller {
             ServerCore c = startedCore();
             ServerSession session = c == null ? null : c.sessions().current().orElse(null);
             if (session == null || session.closeInfo().isPresent()) return false;
-            session.disconnect();
-            rememberServerMessage(session, Messages.forClose(Packet.DisconnectReason.USER));
-            return true;
+            beforeHostDisconnectClose.run(); // test seam outside both runtime and session locks
+            return session.close(new CloseInfo(Packet.DisconnectReason.USER, "disconnected", true));
         }
         ClientSession cs;
         synchronized (lock) {
@@ -517,7 +533,7 @@ public final class AppRuntime implements Controller {
         if (pending == Snapshot.Cleanup.INPUT_FAILED) shownMessage = Messages.INPUT_RELEASE_FAILED;
         else if (pending == Snapshot.Cleanup.INPUT_FAULTED) shownMessage = Messages.INPUT_FAULTED;
         else if (session.preparationFailure().isPresent()) shownMessage = Messages.forThrowable(session.preparationFailure().orElseThrow());
-        rememberServerMessage(session, shownMessage);
+        afterHostSnapshotProjection.run(); // test seam outside both runtime and session locks
         Optional<Packet.SizePayload> screen = session.screen();
         return new Snapshot(role, phase, session.generation(), 0, shownMessage,
                 session.peer().getHostAddress(), cmdPort, imgPort, null,
@@ -526,8 +542,9 @@ public final class AppRuntime implements Controller {
     }
 
     /**
-     * Remembers why a session ended even if it is gone between two snapshots: the message is recorded
-     * when its sockets are closed, as long as no newer session has been seen since.
+     * Reservation clears the previous message; only this close callback records a terminal reason.
+     * Snapshots cannot overwrite it with a projection captured before close. An older session's
+     * callback is ignored once a newer reservation has been observed.
      */
     private void observeSession(ServerSession session) {
         long generation = session.generation();
@@ -550,15 +567,6 @@ public final class AppRuntime implements Controller {
                 }
             }
         });
-    }
-
-    private void rememberServerMessage(ServerSession session, String message) {
-        long generation = session.generation();
-        synchronized (lock) {
-            if (serverState == ServerState.STARTED && observedSession == session && observedGeneration == generation) {
-                serverMessage = message;
-            }
-        }
     }
 
     private Snapshot clientSnapshot() {

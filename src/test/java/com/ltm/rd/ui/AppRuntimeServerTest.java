@@ -556,6 +556,96 @@ class AppRuntimeServerTest {
                 host.serverCore().sessions().currentCode()).status());
     }
 
+    private Runnable holdOutsideLocks(java.util.concurrent.CountDownLatch entered,
+            java.util.concurrent.CountDownLatch release) {
+        cleanupActions.add(release::countDown);
+        return () -> {
+            entered.countDown();
+            boolean interrupted = false;
+            while (release.getCount() != 0) {
+                try { release.await(); } catch (InterruptedException e) { interrupted = true; }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        };
+    }
+
+    @Test void inFlightOpenSnapshotCannotEraseClosedReason() throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var armed = new java.util.concurrent.atomic.AtomicBoolean();
+        Runnable hold = holdOutsideLocks(entered, release);
+        AppRuntime host = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), new FakeAdapterFactory(),
+                AppRuntime.Seams.none(), () -> { if (armed.compareAndSet(true, false)) hold.run(); }, () -> { });
+        runtimes.add(host);
+        get(host.startHost());
+        AppRuntime viewer = viewer(host);
+        active(host, viewer);
+        var session = host.serverCore().sessions().current().orElseThrow();
+        var caller = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            armed.set(true);
+            var snapshot = caller.submit(host::snapshot);
+            assertTrue(entered.await(WAIT_S, java.util.concurrent.TimeUnit.SECONDS));
+            var first = new com.ltm.rd.common.CloseInfo(Packet.DisconnectReason.TIMEOUT, "snapshot race timeout", false);
+            assertTrue(session.close(first));
+            get(session.socketsClosed());
+            get(session.terminated());
+            get(session.inputReleased());
+            awaitTrue(() -> host.serverCore().sessions().current().isEmpty());
+            assertSame(first, session.closeInfo().orElseThrow());
+            assertEquals("Hết thời gian chờ phản hồi.", host.snapshot().message());
+            release.countDown();
+            assertEquals("", snapshot.get(WAIT_S, java.util.concurrent.TimeUnit.SECONDS).message(),
+                    "the in-flight projection was captured while the session was still open");
+            for (int i = 0; i < 3; i++) {
+                Snapshot listening = host.snapshot();
+                assertEquals(UiPhase.LISTENING, listening.phase());
+                assertEquals("Hết thời gian chờ phản hồi.", listening.message());
+            }
+        } finally {
+            release.countDown();
+            caller.shutdownNow();
+            assertTrue(caller.awaitTermination(WAIT_S, java.util.concurrent.TimeUnit.SECONDS));
+        }
+    }
+
+    @Test void timeoutRacingHostDisconnectKeepsFirstReason() throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        AppRuntime host = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), new FakeAdapterFactory(),
+                AppRuntime.Seams.none(), () -> { }, holdOutsideLocks(entered, release));
+        runtimes.add(host);
+        get(host.startHost());
+        AppRuntime viewer = viewer(host);
+        active(host, viewer);
+        var session = host.serverCore().sessions().current().orElseThrow();
+        var caller = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            var disconnected = caller.submit(host::disconnect);
+            assertTrue(entered.await(WAIT_S, java.util.concurrent.TimeUnit.SECONDS));
+            var first = new com.ltm.rd.common.CloseInfo(Packet.DisconnectReason.TIMEOUT, "disconnect race timeout", false);
+            assertTrue(session.close(first));
+            get(session.socketsClosed());
+            get(session.terminated());
+            get(session.inputReleased());
+            awaitTrue(() -> host.serverCore().sessions().current().isEmpty());
+            assertEquals("Hết thời gian chờ phản hồi.", host.snapshot().message());
+            release.countDown();
+            boolean wonClose = disconnected.get(WAIT_S, java.util.concurrent.TimeUnit.SECONDS);
+            assertSame(first, session.closeInfo().orElseThrow());
+            for (int i = 0; i < 3; i++) {
+                Snapshot listening = host.snapshot();
+                assertEquals(UiPhase.LISTENING, listening.phase());
+                assertEquals("Hết thời gian chờ phản hồi.", listening.message());
+            }
+            assertFalse(wonClose, "USER lost the real first-close decision");
+        } finally {
+            release.countDown();
+            caller.shutdownNow();
+            assertTrue(caller.awaitTermination(WAIT_S, java.util.concurrent.TimeUnit.SECONDS));
+        }
+    }
+
     @Test void delayedOldDisconnectAndObserverCannotOverwriteNewSessionReason() throws Exception {
         FakeAdapterFactory adapters = new FakeAdapterFactory();
         AppRuntime host = host(adapters);
