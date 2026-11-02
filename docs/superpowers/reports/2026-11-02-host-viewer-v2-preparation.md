@@ -2,6 +2,8 @@
 
 Ngày 2026-11-02. Run Orca `run_2b84ac203dc6`, branch `feat/wave3-4-desktop-v1`. Phạm vi: sửa pending ticker registration và chuẩn bị thiết kế UI/CLI/H2. Bản triển khai vẫn dùng wire v1; chưa triển khai B1/B2 và chưa push/merge.
 
+**Đợt chuẩn bị đã nghiệm thu:** review cuối **Codex `gpt-6-astra`, high: PASS / APPROVED**, không có finding Critical/Important hoặc blocker mới. Hai Minor đã công khai vẫn giữ giới hạn đúng như phần dưới; chưa có phê duyệt thiết kế UI/CLI/H2 của người dùng hoặc chứng nhận v2.
+
 ## Cleanup mặc định đã nghiệm thu
 
 Code SHA `e58afc77a41870d110cfb456a536f6253644cd94`, base `c48bfda61fa8813e577c49563a21cbf9dc4b3fae`. `ServerCore` nay giữ handle pending registration và gỡ trong shutdown dùng chung, trước khi đóng ticker. Không đổi `Ticker.close`, public API, deadline, gói tin, điều kiện ba future trả slot hoặc UI/CLI.
@@ -20,6 +22,12 @@ Coordinator chạy mới `mvnw.cmd -q clean verify` trên đúng SHA code: **912
 
 JaCoCo và Enforcer đạt. Kết quả được lưu ngoài target bằng log, CSV, summary và toàn bộ XML coordinator; không chạy lại suite đã đạt trên source không đổi. [Review cleanup](../reviews/2026-11-02-pending-ticker-review.md).
 
+## Review cuối Astra
+
+[Báo cáo review toàn đợt](../reviews/2026-11-02-host-viewer-v2-preparation-final-review.md) xét range cố định `3694407..26b0491`, gồm gói thay đổi chính và delta checkpoint. Task `task_4515d13f1ba1`, Dispatch `ctx_c1a587518156`; receipt xác nhận `launch.effective = codex / gpt-6-astra / high`. Reviewer đọc độc lập XML/CSV, proof publication/cleanup, ranh giới B1/B2, CLI migration và H2 thật; source/build vẫn bằng SHA e58afc7 đã verify.
+
+Kết luận: **spec PASS, clean-code/integration PASS / APPROVED**; 0 Critical, 0 Important, hai Minor của Task 1 đã phân xử, không có finding mới hoặc fix wave cần mở. Review chỉ đọc, không chạy thêm Maven/test hoặc helper. Sau completion hợp lệ, worker đã release và Delivery đã ack. Tất cả bảy Dispatch của Run đã hoàn tất/release; không có agent còn đang review.
+
 ## Hai ghi nhận Minor và đính chính
 
 1. Subject commit e58afc7 có U+FEFF trước `fix:`. Raw commit xác nhận `EF BB BF 66 69 78 3A`. Đây là ngoại lệ quy ước Conventional Commits, có thể ảnh hưởng parser yêu cầu type ở đầu chuỗi; không ảnh hưởng source/tree/runtime. Giữ SHA theo ràng buộc không amend/rebase; message sau dùng UTF-8 không BOM.
@@ -37,11 +45,11 @@ Cú pháp đề xuất là `--role host|viewer` và `--address`, từ chối c�
 
 Worker code và designer chạy song song, chỉ worker code được ghi source/index/HEAD/target. Reviewer chỉ đọc, coordinator sở hữu một lượt full verify; designer chỉ ghi artifact riêng. Các Dispatch đã hoàn tất được release trước ack; terminal người dùng tiếp quản được giữ theo receipt.
 
-Gate Task 1 và builder/re-review Task 2 đã đạt; review toàn đợt Astra vẫn chờ. Cần trình Phần 3–4 cụ thể để duyệt trước plan/code B1/B2. PIT/500 race trên SHA v2 cuối, hai JVM và H2 hai máy Windows thật còn là gate sau; không được thay bằng các test headless trong đợt này. Pending ticker của cấu hình mặc định đã xử lý trong SHA nêu trên; nhận định chưa xử lý ở báo cáo A1–B0 là lịch sử của SHA cũ.
+Gate Task 1, builder/re-review Task 2 và review toàn đợt Astra đều đã đạt. **Gate kế tiếp là người dùng duyệt Phần 3–4 cụ thể trước plan/code B1/B2.** PIT/500 race trên SHA v2 cuối, hai JVM và H2 hai máy Windows thật còn là gate sau; không được thay bằng các test headless trong đợt này. Pending ticker của cấu hình mặc định đã xử lý trong SHA nêu trên; nhận định chưa xử lý ở báo cáo A1–B0 là lịch sử của SHA cũ.
 
 Theo chỉ dẫn mới, khi quota còn khoảng 5% phải ghi checkpoint và dừng; sau reset không tự chạy, chỉ tiếp tục khi người dùng nói “bắt đầu”. Checkpoint ghi rõ review/gate nào còn thiếu, không đổi chúng thành PASS để kết thúc phiên.
 
-Đã dừng an toàn khi CLI báo 6% trong lúc chốt phần dự phòng. [Checkpoint để tiếp tục](../checkpoints/2026-11-02-host-viewer-v2-preparation.md) ghi SHA, sáu Dispatch đã release, gói diff/brief và lệnh phục hồi. **Review toàn đợt Astra chưa khởi chạy**, chưa có verdict cuối; không triển khai B1/B2 trong lần dừng này.
+Lịch sử quota: đã checkpoint khi CLI xuống 5%; người dùng nói “continue” sau reset, Run được nối lại với terminal coordinator mới và Astra hoàn tất review. [Checkpoint mới nhất](../checkpoints/2026-11-02-host-viewer-v2-preparation.md) ghi gate đã đóng và gate còn thiếu. Không tự chạy lại sau một lần dừng quota tiếp theo; không triển khai B1/B2 từ riêng lời resume quota.
 
 ## Coordinator rulings (ordered ledger extract)
 

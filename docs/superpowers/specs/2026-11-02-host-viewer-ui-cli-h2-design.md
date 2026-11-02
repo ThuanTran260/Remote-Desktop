@@ -1,6 +1,6 @@
 # Đề xuất Phần 3–4: UI/CLI và nghiệm thu H2 Host/Viewer v2
 
-Ngày: 2026-11-02. **Trạng thái: Đề xuất, chờ người dùng duyệt.** Builder review ban đầu yêu cầu sửa ranh giới B1/B2 và truy vết H2; vòng sửa 1 đã được re-review PASS / APPROVED, cả hai finding ADDRESSED. Review toàn đợt vẫn là gate riêng. Chưa có code/test v2 hoặc kết quả H2; B1/B2 chưa được phép bắt đầu.
+Ngày: 2026-11-02. **Trạng thái: Đề xuất, chờ người dùng duyệt.** Builder review ban đầu yêu cầu sửa ranh giới B1/B2 và truy vết H2; vòng sửa 1 đã được re-review PASS / APPROVED, cả hai finding ADDRESSED. Review toàn đợt Codex Astra high đã PASS / APPROVED. Chưa có code/test v2 hoặc kết quả H2; B1/B2 chưa được phép bắt đầu trước phê duyệt người dùng.
 
 Nguồn đọc cố định: `369440779658424e631b4d0a965f870dde5ea7b9` (gọi tắt **S**). Mọi `path:line` dưới đây thuộc S, được đọc bằng `git show S:path`, không phải số dòng của working tree có worker khác đang sửa. Tham chiếu tương đối tính từ gốc repository. Đặc tả chính: `docs/superpowers/specs/2026-11-01-host-viewer-design.md` (gọi tắt **HV**). “Phần 3–4” trong bản nháp là hai phần UI/CLI và tài liệu/H2 chờ trình bày trong bảng trạng thái HV; không thay thế mục `## 3. Kiểm thử chặn lỗi` đã duyệt của HV.
 

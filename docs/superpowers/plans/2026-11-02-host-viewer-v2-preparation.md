@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-01-host-viewer-design.md` (mục 1, 2, 3.5 và gate Phần 3–4); `docs/superpowers/reviews/2026-11-02-host-viewer-a1-b0-final-review.md` (pending registration follow-up). Bản thiết kế UI/CLI/H2 mới là đề xuất chờ duyệt, không phải giấy phép triển khai B1.
 
+**Nghiệm thu đợt chuẩn bị (2026-11-02):** Task 1 và Task 2 đã hoàn tất; review cuối Codex `gpt-6-astra` high **PASS / APPROVED**, không có Critical/Important hoặc blocker mới, hai Minor metadata/evidence đã công khai. Code `e58afc7` có một lượt coordinator `clean verify` 912/0/0/0; source không đổi sau đó. [Báo cáo và giới hạn](../reports/2026-11-02-host-viewer-v2-preparation.md). **Phần 3–4 vẫn chờ người dùng duyệt trước B1/B2.**
+
 ## Global Constraints
 
 - Baseline: `369440779658424e631b4d0a965f870dde5ea7b9`, checkout `E:/luyentaphe/LapTrinhMang/DoAn-LTM`, branch `feat/wave3-4-desktop-v1`. Người dùng đã yêu cầu tiến hành hai việc được đề xuất; không push/merge/rebase/amend.
@@ -42,15 +44,15 @@
 - Consumes: `Ticker.register(Tickable): Ticker.Registration`, `Registration.close(): void`, `ServerCore.start/close`, `tickerRegistrations()`, seam `beforeResources`.
 - Produces: public API không đổi; một field `private volatile Ticker.Registration pendingRegistration` thuộc core, công bố cùng setup và gỡ trong `releaseResources`. Cả đường close bình thường và late cleanup của start dùng cùng handle; close handle có tính idempotent.
 
-- [ ] Đọc luồng start/close và test liên quan, ghi giả thuyết: ticker còn đếm vì registration không có owner đóng, không phải bằng chứng thread còn chạy.
-- [ ] Thêm test `defaultConfigurationReleasesPendingRegistrationAndPorts`: core dùng constructor public, cổng ephemeral, pending tick bật; assert 1 trước close, 0 sau close và close lần hai; dùng lại hai port; chờ có hạn các rd-thread mới dừng. Luôn đóng core trong finally.
-- [ ] Thêm test `closeBeforeStartDoesNotCreateResources`: close lặp an toàn, registrations 0, start bị từ chối.
-- [ ] Thêm `assertEquals(0, core.tickerRegistrations())` vào helper race hiện hữu sau khi start/closer đã xong; giữ 10 lượt mỗi ca và mọi assertion cũ.
-- [ ] Đổi đúng hai `pendingTickDisabled=true` trong fixture `SlotReleaseIntegrationTest` thành false; không bỏ seam input/worker hay thay kỳ vọng BUSY/PIN.
-- [ ] Chạy test mới/race để thấy đỏ đúng vì registration còn 1; lưu exit code và assertion. Không sửa production trước khi có bằng chứng đỏ.
-- [ ] Giữ handle trả về từ đăng ký pending và gỡ nó trong `releaseResources` trước khi đóng ticker; không đặt lại field làm mất handle giữa hai luồng cleanup.
-- [ ] Chạy `./mvnw.cmd -q -Dtest=ServerCoreCleanupTest,ServerCoreCloseRaceTest,ServerCoreLateBindTest,SlotReleaseIntegrationTest,TickerTest test`; lưu XML và kết quả. Không tự chạy lại để lấy xanh khi có lỗi.
-- [ ] Commit riêng, chỉ bốn file đã nêu, liệt kê test/fixture thay đổi trong body. Worker báo root cause, red/green, SHA, test count và giới hạn. Coordinator giữ gate review + full verify trước nghiệm thu.
+- [x] Đọc luồng start/close và test liên quan, ghi giả thuyết: ticker còn đếm vì registration không có owner đóng, không phải bằng chứng thread còn chạy.
+- [x] Thêm test `defaultConfigurationReleasesPendingRegistrationAndPorts`: core dùng constructor public, cổng ephemeral, pending tick bật; assert 1 trước close, 0 sau close và close lần hai; dùng lại hai port; chờ có hạn các rd-thread mới dừng. Luôn đóng core trong finally.
+- [x] Thêm test `closeBeforeStartDoesNotCreateResources`: close lặp an toàn, registrations 0, start bị từ chối.
+- [x] Thêm `assertEquals(0, core.tickerRegistrations())` vào helper race hiện hữu sau khi start/closer đã xong; giữ 10 lượt mỗi ca và mọi assertion cũ.
+- [x] Đổi đúng hai `pendingTickDisabled=true` trong fixture `SlotReleaseIntegrationTest` thành false; không bỏ seam input/worker hay thay kỳ vọng BUSY/PIN.
+- [x] Chạy test mới/race để thấy đỏ đúng vì registration còn 1; lưu exit code và assertion. Không sửa production trước khi có bằng chứng đỏ.
+- [x] Giữ handle trả về từ đăng ký pending và gỡ nó trong `releaseResources` trước khi đóng ticker; không đặt lại field làm mất handle giữa hai luồng cleanup.
+- [x] Chạy `./mvnw.cmd -q -Dtest=ServerCoreCleanupTest,ServerCoreCloseRaceTest,ServerCoreLateBindTest,SlotReleaseIntegrationTest,TickerTest test`; lưu XML và kết quả. Không tự chạy lại để lấy xanh khi có lỗi.
+- [x] Commit riêng, chỉ bốn file đã nêu, liệt kê test/fixture thay đổi trong body. Worker báo root cause, red/green, SHA, test count và giới hạn. Coordinator giữ gate review + full verify trước nghiệm thu.
 
 ### Task 2: Draft UI/CLI and H2 design without product changes
 
@@ -62,14 +64,14 @@
 - Consumes: mục 1–2 của spec đã duyệt; API UI/CLI hiện tại và yêu cầu H2 cũ. Đọc source tại baseline đã ghim, không dựa vào working tree đang sửa.
 - Produces: thiết kế cụ thể để người dùng duyệt; trạng thái "Đề xuất, chờ duyệt", chưa có code v2.
 
-- [ ] Đối chiếu `LaunchOptions`, `Launcher`, `GuiApp`, `RoleChooserFrame`, `ServerFrame`, `ClientFrame`, `ControlFrame`, `SharingBar`, `AppRuntime`, `Controller`, `Messages`, test UI và README; ghi path:line cho phát hiện về hiện trạng.
-- [ ] Nêu các cách ánh xạ UI/CLI thực tế, trade-off và một phương án đề xuất. Phân biệt quyết định người dùng đã chốt (Host bị điều khiển, Viewer điều khiển) với đề xuất mới.
-- [ ] Chốt trong đề xuất: tên cửa sổ/nút/cờ CLI; tên lớp cũ→mới ở B1/B2; xử lý `--host IP` cũ, flags trùng/mâu thuẫn/sai role, help và exit code; không đưa PIN lên command line/log.
-- [ ] Ghi bảng trạng thái UI và thao tác được phép, gồm chuẩn bị adapter chậm/lỗi, ATTACH theo thứ tự bất kỳ, cancel/reconnect, BUSY/LOCKED/sai mã, hết hạn, mất một kênh, disconnect/shutdown, thất bại nhả input. Bám hợp đồng phần 1/1.8, không tự thay deadline hoặc cấp quyền.
-- [ ] Xác định owner InputExecutor/adapter/cửa sổ và nơi cập nhật UI trên EDT; tránh nhân đôi logic session hoặc Robot trong UI.
-- [ ] Viết nội dung Phần 4: danh sách tài liệu cần cập nhật tại B1/B2; lệnh build/chạy v2 dự kiến, hai hướng H2 đổi máy Host/Viewer, DPI/focus/minimize/key repeat, mất mạng khi giữ input, 30 phút/50 lần kết nối theo gate hiện hữu; bảng lưu SHA/môi trường/kết quả và tiêu chí PASS/FAIL/chưa chạy. Không bịa số đo.
-- [ ] Liệt kê kiểm thử tự động B1/B2 vs kiểm thử hai máy, ranh giới commit B1 nguyên khối và B2 cơ học; không viết implementation plan B1 trước khi thiết kế được duyệt.
-- [ ] Tự review consistency, khoảng trống và user decisions; báo cáo dẫn nguồn local, không sửa tracked files, không chạy test/Maven, không commit.
+- [x] Đối chiếu `LaunchOptions`, `Launcher`, `GuiApp`, `RoleChooserFrame`, `ServerFrame`, `ClientFrame`, `ControlFrame`, `SharingBar`, `AppRuntime`, `Controller`, `Messages`, test UI và README; ghi path:line cho phát hiện về hiện trạng.
+- [x] Nêu các cách ánh xạ UI/CLI thực tế, trade-off và một phương án đề xuất. Phân biệt quyết định người dùng đã chốt (Host bị điều khiển, Viewer điều khiển) với đề xuất mới.
+- [x] Chốt trong đề xuất: tên cửa sổ/nút/cờ CLI; tên lớp cũ→mới ở B1/B2; xử lý `--host IP` cũ, flags trùng/mâu thuẫn/sai role, help và exit code; không đưa PIN lên command line/log.
+- [x] Ghi bảng trạng thái UI và thao tác được phép, gồm chuẩn bị adapter chậm/lỗi, ATTACH theo thứ tự bất kỳ, cancel/reconnect, BUSY/LOCKED/sai mã, hết hạn, mất một kênh, disconnect/shutdown, thất bại nhả input. Bám hợp đồng phần 1/1.8, không tự thay deadline hoặc cấp quyền.
+- [x] Xác định owner InputExecutor/adapter/cửa sổ và nơi cập nhật UI trên EDT; tránh nhân đôi logic session hoặc Robot trong UI.
+- [x] Viết nội dung Phần 4: danh sách tài liệu cần cập nhật tại B1/B2; lệnh build/chạy v2 dự kiến, hai hướng H2 đổi máy Host/Viewer, DPI/focus/minimize/key repeat, mất mạng khi giữ input, 30 phút/50 lần kết nối theo gate hiện hữu; bảng lưu SHA/môi trường/kết quả và tiêu chí PASS/FAIL/chưa chạy. Không bịa số đo.
+- [x] Liệt kê kiểm thử tự động B1/B2 vs kiểm thử hai máy, ranh giới commit B1 nguyên khối và B2 cơ học; không viết implementation plan B1 trước khi thiết kế được duyệt.
+- [x] Tự review consistency, khoảng trống và user decisions; báo cáo dẫn nguồn local, không sửa tracked files, không chạy test/Maven, không commit.
 
 ## Gates and execution ownership
 
