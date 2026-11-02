@@ -1,8 +1,8 @@
 # Đề xuất Phần 3–4: UI/CLI và nghiệm thu H2 Host/Viewer v2
 
-Ngày: 2026-11-02. **Trạng thái: Đề xuất, chờ người dùng duyệt.** Builder review ban đầu yêu cầu sửa ranh giới B1/B2 và truy vết H2; vòng sửa 1 đã được re-review PASS / APPROVED, cả hai finding ADDRESSED. Review toàn đợt Codex Astra high đã PASS / APPROVED. Chưa có code/test v2 hoặc kết quả H2; B1/B2 chưa được phép bắt đầu trước phê duyệt người dùng.
+Ngày: 2026-11-02. **Trạng thái: Người dùng đã duyệt thiết kế để tiếp tục B1/B2.** Câu trả lời phê duyệt: “Duyệt thiết kế, tiếp tục B1/B2 (Khuyến nghị)”. Builder/re-review vòng 1 và review toàn đợt Codex Astra high đã PASS / APPROVED, cả hai finding cũ ADDRESSED. Cho phép lập plan và thực thi B1/B2; phê duyệt thiết kế không phải bằng chứng code/test v2 hoặc H2 đã chạy.
 
-Nguồn đọc cố định: `369440779658424e631b4d0a965f870dde5ea7b9` (gọi tắt **S**). Mọi `path:line` dưới đây thuộc S, được đọc bằng `git show S:path`, không phải số dòng của working tree có worker khác đang sửa. Tham chiếu tương đối tính từ gốc repository. Đặc tả chính: `docs/superpowers/specs/2026-11-01-host-viewer-design.md` (gọi tắt **HV**). “Phần 3–4” trong bản nháp là hai phần UI/CLI và tài liệu/H2 chờ trình bày trong bảng trạng thái HV; không thay thế mục `## 3. Kiểm thử chặn lỗi` đã duyệt của HV.
+Nguồn đọc cố định: `369440779658424e631b4d0a965f870dde5ea7b9` (gọi tắt **S**). Mọi `path:line` dưới đây thuộc S, được đọc bằng `git show S:path`, không phải số dòng của working tree có worker khác đang sửa. Tham chiếu tương đối tính từ gốc repository. Đặc tả chính: `docs/superpowers/specs/2026-11-01-host-viewer-design.md` (gọi tắt **HV**). “Phần 3–4” là hai phần UI/CLI và tài liệu/H2 trong bảng trạng thái HV, nay đã duyệt; không thay thế mục `## 3. Kiểm thử chặn lỗi` đã duyệt của HV.
 
 ## 1. Ý định, điều đã chốt và phạm vi đề xuất
 
@@ -33,7 +33,7 @@ Tên cờ, chính sách bỏ cú pháp cũ, tên lớp UI, cách giữ thông b�
 | --- | --- | --- |
 | Giữ `--server`/`--client`, chỉ đổi nhãn UI | Ít sửa parser nhưng tên TCP tiếp tục đối nghịch ý nghĩa người dùng, script cũ có thể chạy đúng listener nhưng sai máy điều khiển; README phải giải thích hai hệ tên. | Không chọn. |
 | `--host`/`--viewer`, địa chỉ chuyển sang `--address` | Tên ngắn; phải cấm toàn bộ `--host IP` cũ và tránh parser coi IP là đối số thừa sau khi đã chọn Host. Tên cờ cũ đã đổi nghĩa rất dễ gây nhầm. | Có thể làm bằng breaking migration, nhưng không đề xuất. |
-| **`--role host` / `--role viewer` và `--address ADDRESS`**, từ chối toàn bộ cờ vai/địa chỉ cũ | Dài hơn; vai và địa chỉ tách rõ, không dùng lại `--host` với nghĩa khác. Một bộ parse chung và một bản help đủ giải thích. | **Đề xuất chọn**, chưa được người dùng chọn. |
+| **`--role host` / `--role viewer` và `--address ADDRESS`**, từ chối toàn bộ cờ vai/địa chỉ cũ | Dài hơn; vai và địa chỉ tách rõ, không dùng lại `--host` với nghĩa khác. Một bộ parse chung và một bản help đủ giải thích. | **Đã được người dùng chọn và duyệt ngày 2026-11-02.** |
 
 UI đề xuất dùng lại hai form phù hợp hướng kết nối, di chuyển ControlFrame sang form kết nối và SharingBar sang form lắng nghe. Giữ hai form riêng giúp logic enable/disable có locality; một form đa vai sẽ cần nhiều nhánh và ownership cửa sổ khó rõ. Không tạo tầng UI đa vai mới. Việc chuyển handler/cửa sổ phụ trong B1 là đổi hành vi; đổi tên file/lớp trong B2 chỉ cơ học.
 
@@ -304,10 +304,10 @@ Tại S có test v1 để kế thừa: `src/test/java/com/ltm/rd/ui/UiBoundaryTe
 
 B1 phải lật cả hai phía, VERSION/PacketRules/handshake/socket/ownership runtime, hợp đồng ControlView dùng client.ClientPhase cùng producer/consumer/UI/test, UI và CLI đang dùng cùng lúc trong một commit xanh; không phát hành trạng thái nửa v1/nửa v2. B2 chỉ đổi tên/package/import/tài liệu cơ học, đồng bộ tên coverage targets và test map, không đưa bugfix/hành vi mới vào tên “rename”. Nếu phát hiện việc cơ học cần đổi nghĩa thì báo coordinator để tách và review đúng phạm vi. Bản nháp chỉ chốt ranh giới, không đưa task checklist/code/implementation plan B1; plan chỉ được soạn sau duyệt Phần 3–4.
 
-## 5. Những lựa chọn cần trình người dùng sau builder review
+## 5. Những lựa chọn đã được người dùng duyệt ngày 2026-11-02
 
-1. **CLI breaking migration:** chọn đề xuất `--role host|viewer` + `--address`, từ chối cả `--server`/`--client`/`--host IP`; script cũ cần đổi theo vai người dùng, không ánh xạ tự động IP cũ. Phương án còn lại là `--host`/`--viewer` kèm cấm cú pháp cũ, nếu người dùng ưu tiên cờ ngắn.
-2. **Trải nghiệm cửa sổ:** hai form chính, Host tự lắng nghe; đưa mã là đồng ý (đã chốt); SharingBar ở Host, ControlFrame ở Viewer, đóng ControlFrame chỉ ngắt còn đóng form chính thoát ứng dụng. Các tên/nút cụ thể trong 3.2 là đề xuất.
-3. **Thời gian/môi trường H2:** đề xuất đủ bộ chức năng và 30 phút/50 lần ở mỗi hướng A/B; cần xác nhận hai máy/người chạy và cấu hình DPI khả dụng. Chưa đặt lịch, chưa miễn ca không có môi trường.
+1. **CLI breaking migration:** dùng `--role host|viewer` + `--address`, từ chối cả `--server`/`--client`/`--host IP`; script cũ cần đổi theo vai người dùng, không ánh xạ tự động IP cũ. Không chọn phương án cờ `--host`/`--viewer`.
+2. **Trải nghiệm cửa sổ:** hai form chính, Host tự lắng nghe; đưa mã là đồng ý; SharingBar ở Host, ControlFrame ở Viewer, đóng ControlFrame chỉ ngắt còn đóng form chính thoát ứng dụng. Tên/nút cụ thể theo 3.2 đã được duyệt.
+3. **Thời gian/môi trường H2:** đã duyệt đủ bộ chức năng và 30 phút/50 lần ở mỗi hướng A/B; hai máy/người chạy, lịch và cấu hình DPI thực tế được xác nhận khi nghiệm thu. Chưa có số đo hay kết quả chạy; không miễn ca thiếu môi trường.
 
-Các chi tiết routine người soạn đã đề xuất tường minh: không alias cũ, role phân biệt hoa/thường, help validate trước in, cấm address không role, xóa mã sau attempt STARTED, ẩn mã khi bận, giữ lỗi nhập trước snapshot IDLE cũ, không retry input fault. Builder phải kiểm tính khả thi và nhất quán trước; coordinator phân loại finding đã có câu trả lời / routine / consequential, đóng finding material bằng Dispatch sửa draft rồi mới trình duyệt. Không được gọi bản này “design approved” hoặc “v2 implemented”.
+Các chi tiết routine được duyệt cùng thiết kế: không alias cũ, role phân biệt hoa/thường, help validate trước in, cấm address không role, xóa mã sau attempt STARTED, ẩn mã khi bận, giữ lỗi nhập trước snapshot IDLE cũ, không retry input fault. Builder/re-review/final review đã hoàn tất; bước tiếp là plan và thực thi theo hợp đồng này. Trạng thái “design approved” không được diễn giải thành “v2 implemented” hoặc H2 PASS.

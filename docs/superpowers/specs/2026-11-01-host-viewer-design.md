@@ -9,8 +9,8 @@ Ngày: 2026-11-01. Branch: `feat/wave3-4-desktop-v1`. Thay thế quy ước vai 
 | 1 | Hướng kết nối, bắt tay, deadline, hủy/mất kênh | Đã duyệt (2026-10-31) |
 | 2 | Tách package/lớp theo vai, trình tự commit, kiểm thử | **Đã duyệt để triển khai** (2026-11-01, người dùng chốt P2 sau review lần 4). A0 đã xong (`1b3eb94`); chưa có bằng chứng v2 |
 | 2′ | Lộ trình G0 → C0 → A1 → A2 → A3 → A4 → B0 → review toàn đợt | Đã thực thi, review PASS / APPROVED; code v1 `84a4682`. Follow-up pending ticker đã sửa ở `e58afc7`, coordinator verify 912 test đạt; chưa có code/test v2. [Báo cáo chuẩn bị v2](../reports/2026-11-02-host-viewer-v2-preparation.md). |
-| 3 | Giao diện và CLI (tên cửa sổ, cờ dòng lệnh) | [Đề xuất cụ thể đã qua builder review và sửa vòng 1](2026-11-02-host-viewer-ui-cli-h2-design.md), **chờ người dùng duyệt**; B1/B2 chưa được phép bắt đầu. |
-| 4 | Tài liệu, lịch, nghiệm thu H2 | Cùng đề xuất Phần 3–4 ở trên, đã có ma trận hai hướng và tiêu chí bằng chứng; **chờ duyệt**, chưa có kết quả H2 v2. |
+| 3 | Giao diện và CLI (tên cửa sổ, cờ dòng lệnh) | [Thiết kế đã qua builder/re-review và final Astra](2026-11-02-host-viewer-ui-cli-h2-design.md), **người dùng duyệt để tiếp tục B1/B2 ngày 2026-11-02**. |
+| 4 | Tài liệu, lịch, nghiệm thu H2 | Cùng thiết kế Phần 3–4 ở trên, **đã duyệt** ma trận hai hướng và tiêu chí bằng chứng; chưa có kết quả H2 v2, máy/người/lịch thực tế được xác nhận khi chạy. |
 
 Định tuyến hiện hành theo người dùng: thực thi dùng Codex `gpt-6.1-sol`, effort theo độ khó; review cuối được phép dùng `gpt-6-astra`, không dùng Luna/model rẻ hơn hoặc giao thêm Claude. Các tên Sonnet trong lịch sử thiết kế bên dưới là định tuyến cũ. Khi quota còn khoảng 5%, lưu checkpoint và dừng; sau reset chỉ tiếp tục khi người dùng nói “bắt đầu”.
 
@@ -341,7 +341,7 @@ Mỗi commit đều phải xanh. Model và effort ghi theo quy ước worker.
    - `AppRuntime.forHost` sở hữu `InputExecutor` theo 1.8.
    - Chính bước này chuyển chuẩn bị adapter sang `rd-host-prepare`, áp dụng hai điều kiện kích hoạt và các hợp đồng future/offer/deadline ở 1.3, 1.8, 2.3. Đưa test seam `beforeSenderStart` sang phía Host; hook `afterAttachFlushed` ở phía Viewer, không chuyển cả hai theo tên `ClientHooks` cũ.
 
-   Không chia nhỏ được, vì chỉ đổi một phía thì test tích hợp hai phía sẽ đỏ. **B1 và B2 hoãn**: chỉ có plan riêng và chỉ bắt đầu sau khi Phần 3 (UI/CLI) và Phần 4 (tài liệu/H2) được trình bày và duyệt; lộ trình thực thi hiện tại dừng ở review toàn nhánh sau B0. *(sonnet, xhigh; review xhigh)*
+   Không chia nhỏ được, vì chỉ đổi một phía thì test tích hợp hai phía sẽ đỏ. **Điều kiện thiết kế đã đạt ngày 2026-11-02:** người dùng duyệt Phần 3 (UI/CLI) và Phần 4 (tài liệu/H2) để tiếp tục B1/B2. Lập plan riêng trước source; B1 là một commit hành vi nguyên khối, B2 đổi tên/package cơ học. Định tuyến hiện hành: Codex Sol xhigh cho B1 và review, Sol high cho B2; review cuối Astra theo quy tắc model và quota ở đầu spec.
 8. **B2** — chuyển các lớp vỏ sang `host`/`viewer` và đổi tên theo bảng 2.2, không đổi logic. *(sonnet, high; review medium)*
 
 ## 3. Kiểm thử chặn lỗi (đã duyệt cùng Phần 2)
