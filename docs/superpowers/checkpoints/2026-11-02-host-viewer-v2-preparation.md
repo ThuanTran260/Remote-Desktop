@@ -2,7 +2,7 @@
 
 ## Trạng thái mới nhất
 
-**Đợt chuẩn bị đã hoàn tất, review cuối Astra high PASS / APPROVED.** Task `task_4515d13f1ba1` / Dispatch `ctx_c1a587518156` xét range `3694407..26b0491`, không có Critical/Important hoặc blocker mới; hai Minor của Task 1 được công khai và phân xử. [Báo cáo review cuối](../reviews/2026-11-02-host-viewer-v2-preparation-final-review.md). **Gate còn thiếu là người dùng duyệt Phần 3–4 trước plan/code B1/B2.**
+**Đợt chuẩn bị đã hoàn tất, review cuối Astra high PASS / APPROVED.** Task `task_4515d13f1ba1` / Dispatch `ctx_c1a587518156` xét range `3694407..26b0491`, không có Critical/Important hoặc blocker mới; hai Minor của Task 1 được công khai và phân xử. [Báo cáo review cuối](../reviews/2026-11-02-host-viewer-v2-preparation-final-review.md). **Người dùng đã duyệt Phần 3–4 và yêu cầu tiếp tục B1/B2 ngày 2026-11-02**, ghi ở `25b6a53`; chuyển sang [plan B1/B2](../plans/2026-11-02-host-viewer-b1-b2.md).
 
 Source vẫn bằng `e58afc7` đã verify 912/0/0/0; các thay đổi sau đó chỉ là tài liệu. Bảy Dispatch của Run đã settle/release; completion cuối đã được xác thực và ack. Không có reviewer đang chạy hoặc fix wave còn mở trong đợt này. Phiên bản sản phẩm vẫn wire v1, chưa có triển khai/kiểm chứng v2.
 
@@ -35,12 +35,12 @@ Quy tắc vẫn áp dụng: **khi quota còn khoảng 5%, lưu checkpoint và d�
 | Re-review vòng 1 | PASS / APPROVED; cả hai ADDRESSED, không breakage mới | `task_de81bae272a8 / ctx_2ff268cc85e0` |
 | Review cuối Astra high | PASS / APPROVED, 0 Critical/Important, hai Minor đã phân xử; không yêu cầu fix wave | `task_4515d13f1ba1 / ctx_c1a587518156` |
 
-Các worker trên đã release trước ack; không dùng lại lifecycle IDs cũ để gửi completion. Reviewer APPROVED thiết kế có nghĩa đủ điều kiện trình người dùng, **chưa phải người dùng duyệt UI/CLI/H2**. [Báo cáo hiện tại](../reports/2026-11-02-host-viewer-v2-preparation.md), [đề xuất cụ thể](../specs/2026-11-02-host-viewer-ui-cli-h2-design.md).
+Các worker trên đã release trước ack; không dùng lại lifecycle IDs cũ để gửi completion. Reviewer APPROVED chỉ nghiệm thu chuẩn bị; phê duyệt người dùng được ghi riêng sau đó bằng câu trả lời “Duyệt thiết kế, tiếp tục B1/B2 (Khuyến nghị)”. [Báo cáo hiện tại](../reports/2026-11-02-host-viewer-v2-preparation.md), [thiết kế đã duyệt](../specs/2026-11-02-host-viewer-ui-cli-h2-design.md).
 
 ## Việc tiếp theo
 
-1. Trình người dùng duyệt [Phần 3–4](../specs/2026-11-02-host-viewer-ui-cli-h2-design.md): cú pháp CLI breaking, hành vi cửa sổ và cách nghiệm thu H2 hai hướng. Đây là đề xuất đã review, chưa phải user approval.
-2. Sau khi được duyệt, lập plan riêng và triển khai B1/B2 theo quyền sở hữu/kiểm chứng hiện hành; không dùng lại Task/Dispatch đã hoàn tất.
+1. Gate duyệt [Phần 3–4](../specs/2026-11-02-host-viewer-ui-cli-h2-design.md) đã đóng bằng phê duyệt người dùng; không hỏi lại lựa chọn CLI/cửa sổ/H2 đã chốt.
+2. Lập plan riêng và triển khai B1/B2 theo quyền sở hữu/kiểm chứng hiện hành; không dùng lại Task/Dispatch đã hoàn tất. Xem workspace/ledger của plan B1/B2 cho công việc mới.
 3. Source hiện vẫn `Protocol.VERSION = 1`; chưa có UI/CLI/Robot/hai máy v2. Chưa được merge/push hoặc chứng nhận v2 sẵn sàng.
 4. PIT, 500 race trên SHA v2 cuối, hai JVM và H2 thực tế còn chưa chạy. Không dùng 912 headless tests để đánh dấu các gate đó PASS.
 
@@ -51,5 +51,5 @@ Hai Minor Task 1: U+FEFF trước `fix:` trong subject có thể ảnh hưởng 
 1. Đọc checkpoint, ledger `progress.md`, plan và báo cáo; kiểm `git status --short`, `git log -5 --oneline`, source/index còn bằng e58afc7 hay không.
 2. Dùng đúng Orca executable đã ghi: `orchestration run-use --id run_2b84ac203dc6 --json`; `orchestration worker-list --run run_2b84ac203dc6 --include-remote --json`; `orchestration check --run run_2b84ac203dc6 --json`.
 3. Xử lý mọi Delivery trước ack. Tất cả bảy Dispatch nêu trên đã hoàn tất/release ở snapshot này; không giao reviewer cuối trùng. Nếu có attempt mới hơn, kiểm live authority trong ledger/fleet; `unverifiable` không cho phép stop/retry/release.
-4. Tiếp tục tại phê duyệt thiết kế rồi plan B1/B2; không giao lại cleanup/draft/re-review/final review đã đạt, không chạy lại suite chỉ để lấy xanh trên source không đổi.
+4. Tiếp tục tại plan B1/B2 đã được ủy quyền; không giao lại cleanup/draft/re-review/final review hoặc hỏi lại phê duyệt đã đạt, không chạy lại suite chỉ để lấy xanh trên source không đổi.
 5. Giữ một source/index owner và một Maven owner; worker chỉ đọc với báo cáo riêng có thể song song. Không tự tiếp tục sau reset nếu chưa có lời “bắt đầu”.

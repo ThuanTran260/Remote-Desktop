@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-01-host-viewer-design.md` (mục 1, 2, 3.5 và gate Phần 3–4); `docs/superpowers/reviews/2026-11-02-host-viewer-a1-b0-final-review.md` (pending registration follow-up). Bản thiết kế UI/CLI/H2 mới là đề xuất chờ duyệt, không phải giấy phép triển khai B1.
 
-**Nghiệm thu đợt chuẩn bị (2026-11-02):** Task 1 và Task 2 đã hoàn tất; review cuối Codex `gpt-6-astra` high **PASS / APPROVED**, không có Critical/Important hoặc blocker mới, hai Minor metadata/evidence đã công khai. Code `e58afc7` có một lượt coordinator `clean verify` 912/0/0/0; source không đổi sau đó. [Báo cáo và giới hạn](../reports/2026-11-02-host-viewer-v2-preparation.md). **Phần 3–4 vẫn chờ người dùng duyệt trước B1/B2.**
+**Nghiệm thu đợt chuẩn bị (2026-11-02):** Task 1 và Task 2 đã hoàn tất; review cuối Codex `gpt-6-astra` high **PASS / APPROVED**, không có Critical/Important hoặc blocker mới, hai Minor metadata/evidence đã công khai. Code `e58afc7` có một lượt coordinator `clean verify` 912/0/0/0; source không đổi sau đó. [Báo cáo và giới hạn](../reports/2026-11-02-host-viewer-v2-preparation.md). **Người dùng đã duyệt Phần 3–4 để tiếp tục [B1/B2](2026-11-02-host-viewer-b1-b2.md), ghi ở `25b6a53`.**
 
 ## Global Constraints
 

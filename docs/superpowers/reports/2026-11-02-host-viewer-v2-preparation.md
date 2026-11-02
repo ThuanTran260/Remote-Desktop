@@ -2,7 +2,7 @@
 
 Ngày 2026-11-02. Run Orca `run_2b84ac203dc6`, branch `feat/wave3-4-desktop-v1`. Phạm vi: sửa pending ticker registration và chuẩn bị thiết kế UI/CLI/H2. Bản triển khai vẫn dùng wire v1; chưa triển khai B1/B2 và chưa push/merge.
 
-**Đợt chuẩn bị đã nghiệm thu:** review cuối **Codex `gpt-6-astra`, high: PASS / APPROVED**, không có finding Critical/Important hoặc blocker mới. Hai Minor đã công khai vẫn giữ giới hạn đúng như phần dưới; chưa có phê duyệt thiết kế UI/CLI/H2 của người dùng hoặc chứng nhận v2.
+**Đợt chuẩn bị đã nghiệm thu:** review cuối **Codex `gpt-6-astra`, high: PASS / APPROVED**, không có finding Critical/Important hoặc blocker mới. Hai Minor đã công khai vẫn giữ giới hạn đúng như phần dưới. **Người dùng duyệt thiết kế UI/CLI/H2 để tiếp tục B1/B2 ngày 2026-11-02**, ghi ở `25b6a53`; chưa có chứng nhận v2.
 
 ## Cleanup mặc định đã nghiệm thu
 
@@ -39,13 +39,13 @@ Reviewer xếp hai điểm này Minor, không yêu cầu sửa production. Bản
 
 Worker Sol high đã giao [đề xuất Phần 3–4](../specs/2026-11-02-host-viewer-ui-cli-h2-design.md). Builder review Sol high chặn một Important (đổi phase của ControlView phải ở B1, không phải B2) và một Minor (thiếu cắt mạng thật trước ACTIVE). Một worker sửa cả hai trong vòng 1; scoped re-review Sol high kết luận **PASS / APPROVED, cả hai ADDRESSED, không có breakage mới**. [Lịch sử review và re-review](../reviews/2026-11-02-host-viewer-ui-cli-h2-review.md).
 
-Cú pháp đề xuất là `--role host|viewer` và `--address`, từ chối cờ v1 với hướng dẫn migration theo đúng vai máy. Host tự lắng nghe/hiện IP và mã; Viewer nhập địa chỉ/mã; SharingBar thuộc Host, ControlFrame thuộc Viewer. ControlView đổi sang `client.ClientPhase` cùng producer/consumer/UI/test ngay B1; B2 chỉ rename sang `viewer.ViewerPhase`. H2 ghi rõ cắt mạng trước và sau AUTH/ACTIVE, deadline theo phase, hai hướng máy và CHƯA CHẠY khi thiếu bằng chứng. Thiết kế vẫn **chờ người dùng duyệt**; source vẫn v1, chưa có lệnh v2 hoặc kết quả H2.
+Cú pháp đã duyệt là `--role host|viewer` và `--address`, từ chối cờ v1 với hướng dẫn migration theo đúng vai máy. Host tự lắng nghe/hiện IP và mã; Viewer nhập địa chỉ/mã; SharingBar thuộc Host, ControlFrame thuộc Viewer. ControlView đổi sang `client.ClientPhase` cùng producer/consumer/UI/test ngay B1; B2 chỉ rename sang `viewer.ViewerPhase`. H2 ghi rõ cắt mạng trước và sau AUTH/ACTIVE, deadline theo phase, hai hướng máy và CHƯA CHẠY khi thiếu bằng chứng. Thiết kế **đã được người dùng duyệt**; source tại bàn giao vẫn v1, chưa có lệnh v2 hoặc kết quả H2.
 
 ## Quyền sở hữu và việc còn lại
 
 Worker code và designer chạy song song, chỉ worker code được ghi source/index/HEAD/target. Reviewer chỉ đọc, coordinator sở hữu một lượt full verify; designer chỉ ghi artifact riêng. Các Dispatch đã hoàn tất được release trước ack; terminal người dùng tiếp quản được giữ theo receipt.
 
-Gate Task 1, builder/re-review Task 2 và review toàn đợt Astra đều đã đạt. **Gate kế tiếp là người dùng duyệt Phần 3–4 cụ thể trước plan/code B1/B2.** PIT/500 race trên SHA v2 cuối, hai JVM và H2 hai máy Windows thật còn là gate sau; không được thay bằng các test headless trong đợt này. Pending ticker của cấu hình mặc định đã xử lý trong SHA nêu trên; nhận định chưa xử lý ở báo cáo A1–B0 là lịch sử của SHA cũ.
+Gate Task 1, builder/re-review Task 2, review toàn đợt Astra và phê duyệt người dùng Phần 3–4 đều đã đạt. **Bước kế tiếp là [plan và thực thi B1/B2](../plans/2026-11-02-host-viewer-b1-b2.md).** PIT/500 race trên SHA v2 cuối, hai JVM và H2 hai máy Windows thật còn là gate sau; không được thay bằng các test headless trong đợt này. Pending ticker của cấu hình mặc định đã xử lý trong SHA nêu trên; nhận định chưa xử lý ở báo cáo A1–B0 là lịch sử của SHA cũ.
 
 Theo chỉ dẫn mới, khi quota còn khoảng 5% phải ghi checkpoint và dừng; sau reset không tự chạy, chỉ tiếp tục khi người dùng nói “bắt đầu”. Checkpoint ghi rõ review/gate nào còn thiếu, không đổi chúng thành PASS để kết thúc phiên.
 
