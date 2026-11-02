@@ -2,11 +2,16 @@ package com.ltm.rd.server;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.host.FrameEncoder;
+import com.ltm.rd.client.ClientConfig;
+import com.ltm.rd.client.ClientHooks;
+import com.ltm.rd.client.ClientSession;
+import com.ltm.rd.client.SocketConnector;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketType;
+import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
+import com.ltm.rd.host.FrameEncoder;
 import com.ltm.rd.it.RawPeer;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
@@ -34,33 +39,48 @@ class FrameReceiverIntegrationTest {
             Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofMillis(300), Duration.ofSeconds(3),
             Duration.ZERO, Duration.ofSeconds(30), Duration.ofMillis(100));
 
-    private final List<ServerCore> cores = new ArrayList<>();
+    private final List<RawPeer.Server> cores = new ArrayList<>();
+    private final List<ClientSession> viewers = new ArrayList<>();
+    private final java.util.concurrent.ScheduledExecutorService scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+    private final java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newCachedThreadPool();
+    private final Ticker ticker = new Ticker(Duration.ofMillis(100), System::nanoTime);
     private final List<RawPeer> peers = new ArrayList<>();
 
     @AfterEach
-    void cleanup() {
+    void cleanup() throws Exception {
+        viewers.forEach(ClientSession::cancel);
         peers.forEach(RawPeer::close);
-        cores.forEach(ServerCore::close);
+        cores.forEach(RawPeer.Server::close);
+        for (ClientSession viewer : viewers) viewer.terminated().get(WAIT_S, TimeUnit.SECONDS);
+        assertEquals(0, ticker.registrations());
+        ticker.close();
+        scheduler.shutdownNow();
+        executor.shutdownNow();
     }
 
-    private record Active(ServerCore core, ServerSession session, RawPeer cmd, RawPeer img) {}
+    private record Active(RawPeer.Server core, ClientSession session, RawPeer cmd, RawPeer img) {}
 
     /** AUTH, SCREEN_INFO 1920x1080, ATTACH, then waits for SESSION_ACTIVE. */
-    private Active activate() throws IOException {
-        ServerCore core = new ServerCore(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, TIMEOUTS,
-                System::nanoTime, new SecureRandom()));
+    private Active activate() throws Exception {
+        RawPeer.Server core = new RawPeer.Server();
         cores.add(core);
-        core.start();
-        RawPeer cmd = RawPeer.connect(core.cmdPort());
+        ClientSession viewer = new ClientSession(new ClientConfig("127.0.0.1", core.cmdPort(), core.imgPort(),
+                "123456", TIMEOUTS, System::nanoTime), 1, SocketConnector.DEFAULT, ClientHooks.none(),
+                ticker, scheduler, executor);
+        viewers.add(viewer);
+        viewer.start();
+        RawPeer cmd = core.acceptCmd();
         peers.add(cmd);
-        cmd.send(Packet.auth(core.sessions().currentCode()));
-        byte[] token = cmd.read().authResultPayload().token();
+        assertEquals(PacketType.AUTH, cmd.read().type());
+        byte[] token = new byte[16];
+        cmd.send(Packet.authResult(Packet.AuthStatus.OK, token));
         cmd.send(Packet.screenInfo(1920, 1080));
-        RawPeer img = RawPeer.connect(core.imgPort());
+        RawPeer img = core.acceptImg();
         peers.add(img);
-        img.send(Packet.attach(token));
-        cmd.readUntil(PacketType.SESSION_ACTIVE);
-        return new Active(core, core.sessions().current().orElseThrow(), cmd, img);
+        assertEquals(Packet.attach(token), img.read());
+        cmd.send(Packet.sessionActive());
+        viewer.activated().get(WAIT_S, TimeUnit.SECONDS);
+        return new Active(core, viewer, cmd, img);
     }
 
     private static byte[] jpeg(int w, int h) throws IOException {

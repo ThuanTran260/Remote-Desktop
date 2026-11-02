@@ -35,4 +35,17 @@ class UiBoundaryTest {
         }
         assertEquals(List.of(), violations);
     }
+
+    @Test
+    void auxiliaryWindowsBelongToCorrectRole() throws IOException {
+        String host = Files.readString(UI_SOURCES.resolve("ServerFrame.java"), StandardCharsets.UTF_8);
+        String viewer = Files.readString(UI_SOURCES.resolve("ClientFrame.java"), StandardCharsets.UTF_8);
+        assertTrue(host.contains("new SharingBar("));
+        assertFalse(host.contains("ControlFrame"));
+        assertTrue(viewer.contains("new ControlFrame("));
+        assertFalse(viewer.contains("SharingBar"));
+        Pattern runtimeDetails = Pattern.compile("\\b(Robot|InputExecutor|ServerSession|ClientSession|CompletableFuture)\\b");
+        assertFalse(runtimeDetails.matcher(host).find());
+        assertFalse(runtimeDetails.matcher(viewer).find());
+    }
 }

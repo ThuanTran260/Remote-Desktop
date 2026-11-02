@@ -20,7 +20,7 @@ final class SharingBar extends JFrame {
     private final BarLayoutGate gate = new BarLayoutGate();
 
     SharingBar(Controller controller) {
-        super("Đang chia sẻ màn hình");
+        super("Host — Đang chia sẻ màn hình");
         // never take keyboard focus: injected keys must not reach this bar; the mouse still works
         setFocusableWindowState(false);
         setAutoRequestFocus(false);

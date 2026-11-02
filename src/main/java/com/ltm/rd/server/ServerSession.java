@@ -1,9 +1,5 @@
 package com.ltm.rd.server;
 
-import com.ltm.rd.viewer.ControlSide;
-import com.ltm.rd.viewer.ControlView;
-import com.ltm.rd.viewer.InputOutcome;
-
 import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.CommandWriter;
@@ -11,10 +7,10 @@ import com.ltm.rd.common.Heartbeat;
 import com.ltm.rd.common.LifecyclePort;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
-import com.ltm.rd.common.PacketRules;
 import com.ltm.rd.common.PacketRules.Lane;
 import com.ltm.rd.common.PacketRules.Shell;
 import com.ltm.rd.common.PacketRules.Stage;
+import com.ltm.rd.common.PacketRules;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
@@ -26,7 +22,10 @@ import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.common.TrafficSnapshot;
 import com.ltm.rd.common.WriteWatchdog;
-import java.awt.image.BufferedImage;
+import com.ltm.rd.host.AdapterFactory;
+import com.ltm.rd.host.ControlledSide;
+import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.host.ScreenGeometry;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.SocketException;
@@ -37,6 +36,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.UnaryOperator;
 
@@ -50,26 +50,17 @@ public final class ServerSession implements Tickable {
 
     /** Collaborators a session needs besides its identity; {@code ticker} may be null in unit tests. */
     record Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
-            Runnable afterTokenCheck, boolean receiveFrames,
-            UnaryOperator<CompletableFuture<Void>> inputReleaseSeam) {
-        Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
-                Runnable afterTokenCheck, boolean receiveFrames) {
-            this(timeouts, clock, ticker, shuttingDown, afterTokenCheck, receiveFrames, null);
-        }
-
-        Env(Timeouts timeouts, LongSupplier clock, Ticker ticker, BooleanSupplier shuttingDown,
-                Runnable afterTokenCheck) {
-            this(timeouts, clock, ticker, shuttingDown, afterTokenCheck, true);
-        }
-
+            Runnable afterTokenCheck, UnaryOperator<CompletableFuture<Void>> inputReleaseSeam,
+            InputExecutor input, AdapterFactory adapters, Consumer<ScreenGeometry> publishBounds,
+            Runnable beforeSenderStart) {
         Env {
             Objects.requireNonNull(timeouts);
             Objects.requireNonNull(clock);
             Objects.requireNonNull(shuttingDown);
-        }
-
-        static Env standalone() {
-            return new Env(Timeouts.DEFAULTS, System::nanoTime, null, () -> false, null);
+            Objects.requireNonNull(input);
+            Objects.requireNonNull(adapters);
+            Objects.requireNonNull(publishBounds);
+            Objects.requireNonNull(beforeSenderStart);
         }
     }
 
@@ -86,14 +77,10 @@ public final class ServerSession implements Tickable {
     private Channel imageChannel;
 
     private final SessionPort port;
-    private final ControlSide side;
+    private final ControlledSide side;
+    private boolean activationAttempted;
     private final CompletableFuture<Void> inputReleased;
     private volatile Heartbeat heartbeat;
-
-    ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
-            SessionLifecycle<ServerPhase> lifecycle) {
-        this(generation, token, peer, reservedAtNanos, lifecycle, Env.standalone());
-    }
 
     ServerSession(long generation, byte[] token, InetAddress peer, long reservedAtNanos,
             SessionLifecycle<ServerPhase> lifecycle, Env env) {
@@ -112,7 +99,8 @@ public final class ServerSession implements Tickable {
                     @Override public CommandWriter writer() { return writer; }
                     @Override public void tryActivate(SessionLifecycle.Tx<ServerPhase> tx) { maybeActivate(tx); }
                 });
-        this.side = new ControlSide(port, env.timeouts(), env.clock(), env.receiveFrames());
+        this.side = new ControlledSide(port, env.input(), env.adapters(), env.publishBounds(),
+                env.timeouts(), env.clock(), env.beforeSenderStart());
         lifecycle.addCloseHook(() -> SessionSide.bridgeClosing(() -> {
             CompletableFuture<Void> source = side.onClosing();
             return env.inputReleaseSeam() == null ? source : env.inputReleaseSeam().apply(source);
@@ -144,7 +132,7 @@ public final class ServerSession implements Tickable {
         return lifecycle.phase();
     }
 
-    /** The Client screen size once SCREEN_INFO arrived. */
+    /** The prepared Host screen size once SCREEN_INFO was accepted. */
     public Optional<Packet.SizePayload> screen() {
         return side.screen();
     }
@@ -154,7 +142,7 @@ public final class ServerSession implements Tickable {
     /** Closes the session if it is still RESERVED when the reserve window has passed. */
     @Override
     public void tick(long nowNanos) {
-        if (!side.tick(nowNanos) && reserveExpired(nowNanos)) {
+        if (reserveExpired(nowNanos)) {
             lifecycle.closeIf(ServerPhase.RESERVED, new CloseInfo(Packet.DisconnectReason.TIMEOUT, "attach timeout", true));
         }
     }
@@ -261,10 +249,10 @@ public final class ServerSession implements Tickable {
                 return false;
             }
             switch (p.type()) {
-                case SCREEN_INFO -> port.atomically(stx -> { side.onPacket(stx, p); return null; });
                 case PING -> port.atomically(stx -> { Heartbeat.answerPing(stx, port, p); return null; });
                 case DISCONNECT -> tx.close(new CloseInfo(p.disconnectPayload().reason(), "peer disconnected", false));
-                default -> { }
+                case PONG -> { }
+                default -> port.atomically(stx -> { side.onPacket(stx, p); return null; });
             }
             return true;
         });
@@ -288,7 +276,10 @@ public final class ServerSession implements Tickable {
             if (p.version() != Protocol.VERSION) return AttachResult.REJECTED;
             if (tx.isClosed()) return AttachResult.REJECTED;
             if (tx.phase() != ServerPhase.RESERVED) return AttachResult.REJECTED;
-            if (reserveExpired(now)) return AttachResult.REJECTED;
+            if (reserveExpired(env.clock().getAsLong())) {
+                tx.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "attach timeout", true));
+                return AttachResult.REJECTED;
+            }
             if (env.shuttingDown().getAsBoolean()) return AttachResult.REJECTED; // volatile read, no lock
             if (!MessageDigest.isEqual(p.token(), token)) return AttachResult.REJECTED;
             if (env.afterTokenCheck() != null) env.afterTokenCheck().run(); // test seam, a no-op in production
@@ -311,48 +302,42 @@ public final class ServerSession implements Tickable {
      * timestamp the caller took before it waited for the lock.
      */
     private void maybeActivate(SessionLifecycle.Tx<ServerPhase> tx) {
-        if (writer == null || !side.readyForActive() || imageChannel == null) return;
-        if (tx.isClosed() || tx.phase() != ServerPhase.RESERVED) return;
+        if (tx.isClosed() || tx.phase() != ServerPhase.RESERVED || activationAttempted) return;
         long activationNanos = env.clock().getAsLong();
-        if (reserveExpired(activationNanos)) return;
+        if (reserveExpired(activationNanos)) {
+            tx.close(new CloseInfo(Packet.DisconnectReason.TIMEOUT, "attach timeout", true));
+            return;
+        }
+        if (writer == null || !side.readyForActive() || imageChannel == null) return;
+        activationAttempted = true;
+        if (!port.atomically(stx -> side.onActive(stx, activationNanos, imageChannel))) {
+            tx.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "input session refused", true));
+            return;
+        }
         switch (writer.offer(Packet.sessionActive())) {
-            case ACCEPTED -> {
-                if (tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE)) {
-                    port.atomically(stx -> side.onActive(stx, activationNanos, imageChannel));
-                }
-            }
+            case ACCEPTED -> tx.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE);
             case OVERFLOW -> tx.close(new CloseInfo(Packet.DisconnectReason.OVERFLOW, "command queue overflow", true));
-            default -> { } // CLOSED or COALESCED: the session is already going away
+            default -> tx.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "activation rejected", true));
         }
     }
 
-    // ---- frames and the control gate ---------------------------------------------------------
-
-    void publishFrame(long frameGeneration, BufferedImage image, long now) {
-        side.publishFrame(frameGeneration, image, now);
-    }
-
-    public boolean controlEnabled() { return side.controlEnabled(); }
-    public CommandWriter.OfferResult offerInput(Packet p) { return side.offerInput(p); }
-    public InputOutcome offerInput(long inputEpoch, Packet p) { return side.offerInput(inputEpoch, p); }
-    public CommandWriter.OfferResult releaseControlInput() { return side.releaseControlInput(); }
-    public long controlReleasesSent() { return side.controlReleasesSent(); }
-    public long inputEpoch() { return side.inputEpoch(); }
-
-    /** Gate, epoch, latest frame and frame count read under the same lifecycle lock. */
-    public ControlView controlView() {
-        return lifecycle.atomically(tx -> new ControlView(generation, tx.phase(), side.controlEnabled(),
-                side.inputEpoch(), side.latestFrame().orElse(null), side.framesReceived()));
-    }
-
+    public long framesSent() { return side.framesSent(); }
+    public long releaseAllReceived() { return side.releaseAllReceived(); }
+    public int inputBeginCount() { return side.inputBeginCount(); }
+    public int senderRuns() { return side.senderRuns(); }
+    public Optional<Throwable> preparationFailure() { return side.preparationFailure(); }
     SessionPort port() { return port; }
-    ControlSide controlSide() { return side; }
 
     // ---- close, observability for the UI ------------------------------------------------------
 
     /** The user ends the session: DISCONNECT(USER) is sent to the Client. */
     public void disconnect() {
         lifecycle.close(new CloseInfo(Packet.DisconnectReason.USER, "disconnected", true));
+    }
+
+    /** Closes with the caller's cause, returning whether it won the first-close decision. */
+    public boolean close(CloseInfo info) {
+        return lifecycle.close(info);
     }
 
     /** Completes when every socket of the session is closed. */
@@ -389,9 +374,4 @@ public final class ServerSession implements Tickable {
                 imageChannel == null ? 0 : imageChannel.traffic().bytesOut()));
     }
 
-    public Optional<BufferedImage> latestFrame() { return side.latestFrame(); }
-    public OptionalLong activeAtNanos() { return side.activeAtNanos(); }
-    public long framesReceived() { return side.framesReceived(); }
-    public long releaseAllSent() { return side.releaseAllSent(); }
-    public void addFrameObserver(ControlSide.FrameObserver observer) { side.addFrameObserver(observer); }
 }

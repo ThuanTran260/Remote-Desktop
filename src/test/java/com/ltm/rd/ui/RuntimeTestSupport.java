@@ -38,7 +38,7 @@ final class RuntimeTestSupport {
 
     /** Names of the threads that belong to one session; none may outlive it. */
     private static final String[] SESSION_THREADS = {"rd-connect", "rd-cmd-reader", "rd-cmd-writer-",
-            "rd-screen-sender", "rd-frame-receiver"};
+            "rd-screen-sender", "rd-frame-receiver", "rd-host-prepare"};
 
     /** Waits until no thread of a finished session is left that was not already alive in {@code before}. */
     static void awaitNoSessionThreads(Set<Thread> before) {

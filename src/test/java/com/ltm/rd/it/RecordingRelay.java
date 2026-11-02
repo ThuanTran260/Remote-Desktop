@@ -200,6 +200,9 @@ final class RecordingRelay implements AutoCloseable {
     private final ServerSocket cmdListener;
     private final ServerSocket imgListener;
     private final List<Socket> sockets = new ArrayList<>();
+    private final List<Socket> imageSockets = new ArrayList<>();
+    private volatile CountDownLatch authResultGate;
+    private volatile CountDownLatch attachForwardGate;
     private final List<Thread> threads = new ArrayList<>();
     private volatile boolean closed;
     private boolean tampered; // only touched by the single IMG C2S pump
@@ -244,6 +247,28 @@ final class RecordingRelay implements AutoCloseable {
         imageGate.countDown();
     }
 
+    void holdAuthResult() { authResultGate = new CountDownLatch(1); }
+    void holdAttachForward() { attachForwardGate = new CountDownLatch(1); }
+    void openAttachForwardGate() {
+        CountDownLatch gate = attachForwardGate;
+        if (gate != null) gate.countDown();
+    }
+    synchronized String imageState() {
+        return "sockets=" + imageSockets.size() + ", allClosed=" + imageSockets.stream().allMatch(Socket::isClosed)
+                + ", imageGate=" + imageGate.getCount() + ", attachGate="
+                + (attachForwardGate == null ? "none" : attachForwardGate.getCount());
+    }
+    void openAuthResultGate() {
+        CountDownLatch gate = authResultGate;
+        if (gate != null) gate.countDown();
+    }
+
+    void closeImageConnections() {
+        List<Socket> copy;
+        synchronized (this) { copy = new ArrayList<>(imageSockets); }
+        copy.forEach(RecordingRelay::closeQuietly);
+    }
+
     /** Waits (bounded) until the real server closed the image connection this relay opened. */
     boolean awaitImageClosedByServer() throws InterruptedException {
         return imageClosedByServer.await(MAX_WAIT_S, TimeUnit.SECONDS);
@@ -262,6 +287,9 @@ final class RecordingRelay implements AutoCloseable {
                 Socket serverSide = new Socket(InetAddress.getLoopbackAddress(), serverPort);
                 track(clientSide);
                 track(serverSide);
+                if (lane == Lane.IMG) {
+                    synchronized (this) { imageSockets.add(clientSide); imageSockets.add(serverSide); }
+                }
                 AtomicInteger open = new AtomicInteger(2);
                 startThread("test-relay-" + lane + "-c2s",
                         () -> pump(lane, Dir.C2S, clientSide, serverSide, open));
@@ -284,6 +312,16 @@ final class RecordingRelay implements AutoCloseable {
                 if (read.isEmpty()) break;
                 Packet packet = read.get();
                 record(trace, dir, packet);
+                CountDownLatch attachGate = attachForwardGate;
+                if (attachGate != null && lane == Lane.IMG && dir == Dir.C2S && packet.type() == PacketType.ATTACH) {
+                    try { attachGate.await(); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+                }
+                CountDownLatch gate = authResultGate;
+                if (gate != null && lane == Lane.CMD && dir == Dir.S2C && packet.type() == PacketType.AUTH_RESULT) {
+                    try { gate.await(); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+                }
                 PacketIO.write(out, maybeTamper(lane, dir, packet));
                 out.flush();
             }
@@ -358,6 +396,9 @@ final class RecordingRelay implements AutoCloseable {
     @Override
     public void close() {
         closed = true;
+        openAuthResultGate();
+        openAttachForwardGate();
+        imageGate.countDown();
         List<Socket> toClose;
         List<Thread> toJoin;
         synchronized (this) {

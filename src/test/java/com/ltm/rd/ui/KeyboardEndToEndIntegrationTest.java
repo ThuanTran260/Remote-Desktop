@@ -4,10 +4,10 @@ import static com.ltm.rd.ui.RuntimeTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.host.FakeInputDevice;
-import com.ltm.rd.host.FakeScreenSource;
 import com.ltm.rd.common.FakeClock;
 import com.ltm.rd.common.Packet;
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
 import com.ltm.rd.server.ServerSession;
 import java.awt.event.FocusEvent;
 import java.awt.event.KeyEvent;
@@ -58,13 +58,12 @@ class KeyboardEndToEndIntegrationTest {
         final InputCapture capture;
 
         Rig(LongSupplier serverClock) throws Exception {
-            server = AppRuntime.forServer(serverConfig(serverClock, 0, 0));
-            runtimes.add(server);
-            get(server.startServer());
-            Snapshot listening = server.snapshot();
-            client = AppRuntime.forClient(clientConfig(listening.cmdPort(), listening.imgPort(), System::nanoTime),
-                    adapters);
+            client = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), adapters);
             runtimes.add(client);
+            get(client.startHost());
+            Snapshot listening = client.snapshot();
+            server = AppRuntime.forViewer(clientConfig(listening.cmdPort(), listening.imgPort(), serverClock));
+            runtimes.add(server);
             sink = new FakeController(server);
             panel.setSize(960, 540);
             capture = new InputCapture(sink, panel, () -> true, () -> { });
@@ -72,7 +71,7 @@ class KeyboardEndToEndIntegrationTest {
         }
 
         void connect() throws Exception {
-            assertEquals(ConnectOutcome.STARTED, client.connect("127.0.0.1", server.snapshot().code()));
+            assertEquals(ConnectOutcome.STARTED, server.connect("127.0.0.1", client.snapshot().code()));
             await(server, s -> s.controlEnabled());
             refresh();
         }
@@ -104,12 +103,12 @@ class KeyboardEndToEndIntegrationTest {
             SwingUtilities.invokeAndWait(() -> capture.focusGained(new FocusEvent(panel, FocusEvent.FOCUS_GAINED)));
         }
 
-        ClientSession clientSession() {
-            return client.clientSession().orElseThrow();
+        ServerSession clientSession() {
+            return client.serverCore().sessions().current().orElseThrow();
         }
 
-        ServerSession serverSession() {
-            return server.serverCore().sessions().current().orElseThrow();
+        ClientSession serverSession() {
+            return server.clientSession().orElseThrow();
         }
 
         long count(String call) {
@@ -147,15 +146,15 @@ class KeyboardEndToEndIntegrationTest {
     @Test
     void networkDropWhileCtrlHeldReleasesOnClient() throws Exception {
         Rig rig = new Rig(System::nanoTime);
-        ClientSession first = rig.clientSession();
+        ServerSession first = rig.clientSession();
         rig.key(KeyEvent.KEY_PRESSED, KeyEvent.VK_CONTROL);
         assertTrue(rig.adapters.device.awaitCall("keyPress:17"));
 
         assertTrue(rig.server.disconnect()); // the session ends without any key release from the user
         assertTrue(rig.adapters.device.awaitCall("keyRelease:17"));
         get(first.inputReleased());
-        await(rig.server, s -> s.phase() == UiPhase.LISTENING);
-        await(rig.client, s -> s.phase() == UiPhase.IDLE);
+        await(rig.client, s -> s.phase() == UiPhase.LISTENING);
+        await(rig.server, s -> s.phase() == UiPhase.IDLE);
 
         rig.connect(); // the next session does not hold the old key
         rig.focusLost();
@@ -194,7 +193,7 @@ class KeyboardEndToEndIntegrationTest {
     @Test
     void queueOverflowWhileKeyHeldStillReleasesKey() throws Exception {
         Rig rig = new Rig(System::nanoTime);
-        ClientSession cs = rig.clientSession();
+        ServerSession cs = rig.clientSession();
         rig.key(KeyEvent.KEY_PRESSED, KeyEvent.VK_CONTROL);
         assertTrue(rig.adapters.device.awaitCall("keyPress:17"));
         FakeInputDevice.Gate gate = rig.adapters.device.blockOn("mouseWheel:1");

@@ -1,7 +1,5 @@
 package com.ltm.rd.server;
 
-import com.ltm.rd.viewer.InputOutcome;
-
 import static com.ltm.rd.common.FakeClock.s;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -15,6 +13,11 @@ import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.SessionLifecycle;
 import com.ltm.rd.common.Timeouts;
+import com.ltm.rd.host.AdapterFactory;
+import com.ltm.rd.host.FakeScreenSource;
+import com.ltm.rd.host.InputDevice;
+import com.ltm.rd.host.ScreenSource;
+import com.ltm.rd.viewer.InputOutcome;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -29,15 +32,21 @@ import java.net.Socket;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongSupplier;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -68,8 +77,16 @@ class ServerSessionProtocolEdgesTest {
         return t;
     });
     private final FakeClock clock = new FakeClock();
+    private final AtomicLong generations = new AtomicLong();
     private final List<ServerSession> sessions = new ArrayList<>();
     private final List<CountDownLatch> gates = new ArrayList<>();
+    private final Map<ServerSession, CountDownLatch> prepareGates = new IdentityHashMap<>();
+    private final Map<ServerSession, AtomicLong> activationTimes = new IdentityHashMap<>();
+    private final Map<ServerSession, CountDownLatch> geometryRead = new IdentityHashMap<>();
+    private final Map<ServerSession, CountDownLatch> prepareStarted = new IdentityHashMap<>();
+
+
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
 
     @AfterEach
     void shutdown() {
@@ -79,9 +96,21 @@ class ServerSessionProtocolEdgesTest {
         }
         scheduler.shutdownNow();
         cleanup.shutdownNow();
+        hostResources.close();
     }
 
     // ---- fixtures --------------------------------------------------------------------------
+
+    @Test void prepareAtReserveDeadlineWithoutTickClosesTimeout() {
+        ServerSession session = newSession();
+        clock.set(s(5));
+        PendingConnection pc = new PendingConnection(new Socket(), s(5));
+        assertTrue(session.attachCommandChannel(pc, cmdChannel(pc, new Sink(null)), s(5)));
+        assertTrue(session.closeInfo().isPresent(), "the reserve deadline must close without a ticker");
+        assertEquals(Packet.DisconnectReason.TIMEOUT, closeInfo(session).reason());
+        assertEquals("attach timeout", closeInfo(session).message());
+        assertTrue(session.screen().isEmpty());
+    }
 
     /** Bytes become visible only on flush; an optional gate blocks the writer inside its first write. */
     private static final class Sink extends OutputStream {
@@ -181,9 +210,41 @@ class ServerSessionProtocolEdgesTest {
     private ServerSession newSession(LongSupplier sessionClock) {
         SessionLifecycle<ServerPhase> lifecycle = new SessionLifecycle<>(ServerPhase.RESERVED, ServerPhase.CLOSING,
                 System::nanoTime, Duration.ofMillis(50), scheduler, cleanup);
-        ServerSession.Env env = new ServerSession.Env(TIMEOUTS, sessionClock, null, () -> false, null, false);
-        ServerSession session = new ServerSession(1, TOKEN, InetAddress.getLoopbackAddress(), 0, lifecycle, env);
+        CountDownLatch prepareGate = new CountDownLatch(1);
+        gates.add(prepareGate);
+        AtomicLong activationTime = new AtomicLong(Long.MIN_VALUE);
+        CountDownLatch geometryReady = new CountDownLatch(1);
+        CountDownLatch preparing = new CountDownLatch(1);
+        AdapterFactory adapters = new AdapterFactory() {
+            @Override public void refreshInputDevice() {
+                preparing.countDown();
+                try { prepareGate.await(); }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("test adapter interrupted", e);
+                }
+            }
+            @Override public ScreenSource newScreenSource() {
+                FakeScreenSource delegate = new FakeScreenSource(1920, 1080);
+                return new ScreenSource() {
+                    @Override public com.ltm.rd.host.ScreenGeometry geometry() {
+                        geometryReady.countDown();
+                        return delegate.geometry();
+                    }
+                    @Override public BufferedImage capture(java.awt.Rectangle bounds) throws IOException { return delegate.capture(bounds); }
+                };
+            }
+            @Override public InputDevice inputDevice() { throw new AssertionError("session borrows input"); }
+        };
+        ServerSession.Env env = new ServerSession.Env(TIMEOUTS, sessionClock, null, () -> false, null, null,
+                hostResources.input, adapters, geometry -> activationTime.set(sessionClock.getAsLong()), () -> { });
+        ServerSession session = new ServerSession(generations.incrementAndGet(), TOKEN,
+                InetAddress.getLoopbackAddress(), 0, lifecycle, env);
         sessions.add(session);
+        prepareGates.put(session, prepareGate);
+        activationTimes.put(session, activationTime);
+        geometryRead.put(session, geometryReady);
+        prepareStarted.put(session, preparing);
         return session;
     }
 
@@ -208,8 +269,9 @@ class ServerSessionProtocolEdgesTest {
 
     private ServerSession active(Sink sink) {
         ServerSession session = reserved(sink);
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        releasePrepare(session);
         attachImage(session, 0);
+        awaitHost(() -> session.phase() == ServerPhase.ACTIVE || session.closeInfo().isPresent());
         assertEquals(ServerPhase.ACTIVE, session.phase());
         return session;
     }
@@ -220,13 +282,6 @@ class ServerSessionProtocolEdgesTest {
 
     private static void awaitEntered(Sink sink) throws InterruptedException {
         assertTrue(sink.entered.await(WAIT_S, TimeUnit.SECONDS), "the writer is stuck inside its first write");
-    }
-
-    /** With the writer stuck in its first write, fills the 256-slot queue with input the gate lets through. */
-    private static void fillWithInput(ServerSession session) {
-        for (int i = 0; i < CommandWriter.DEFAULT_CAPACITY; i++) {
-            assertEquals(InputOutcome.SENT, session.offerInput(0, Packet.keyPress(i + 1)), "fill " + i);
-        }
     }
 
     /** Lets the first PONG into the writer (which then blocks) and queues 256 more, so the queue is full. */
@@ -257,18 +312,16 @@ class ServerSessionProtocolEdgesTest {
      */
     private void assertStaysReservedUntilTheAttachTimeout(ServerSession session, Sink sink, long tickAt)
             throws Exception {
-        assertEquals(ServerPhase.RESERVED, session.phase());
-        assertTrue(session.activeAtNanos().isEmpty());
-        session.dispatch(Packet.ping(1)); // the writer must be running, or the short close grace could skip DISCONNECT
-        assertEquals(List.of(PacketType.PONG), awaitWritten(sink, 1));
-
+        assertEquals(ServerPhase.CLOSING, session.phase());
+        assertTrue(activationTime(session).isEmpty());
         session.tick(tickAt);
-
         CloseInfo info = closeInfo(session);
         assertEquals(Packet.DisconnectReason.TIMEOUT, info.reason());
         assertEquals("attach timeout", info.message());
         assertTrue(info.sendDisconnect());
-        assertEquals(List.of(PacketType.PONG, PacketType.DISCONNECT), awaitWritten(sink, 2));
+        assertFalse(writtenTypes(sink).contains(PacketType.SESSION_ACTIVE));
+        assertEquals(0, session.inputBeginCount());
+        assertEquals(0, session.senderRuns());
     }
 
     // ---- command channel hand-over ---------------------------------------------------------
@@ -314,7 +367,7 @@ class ServerSessionProtocolEdgesTest {
     @Test
     void secondScreenInfoInReservedPassesRulesButClosesSession() {
         ServerSession session = reserved(new Sink(null));
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        releasePrepare(session);
         assertEquals(ServerPhase.RESERVED, session.phase());
 
         session.dispatch(Packet.screenInfo(1280, 720));
@@ -323,7 +376,7 @@ class ServerSessionProtocolEdgesTest {
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
         assertEquals("unexpected SCREEN_INFO", info.message());
         assertTrue(info.sendDisconnect());
-        assertTrue(session.activeAtNanos().isEmpty());
+        assertTrue(activationTime(session).isEmpty());
         assertEquals(ServerPhase.CLOSING, session.phase());
         assertEquals(new Packet.SizePayload(1920, 1080), session.screen().orElseThrow());
     }
@@ -332,7 +385,7 @@ class ServerSessionProtocolEdgesTest {
     void neverValidCommandTypeIsRejectedByTheReader() throws Exception {
         ServerSession session = newSession();
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        PacketIO.write(new DataOutputStream(bytes), Packet.mouseMove(1, 1));
+        PacketIO.write(new DataOutputStream(bytes), Packet.frame(16, 9, new byte[10]));
         PendingConnection pc = new PendingConnection(new Socket(), 0);
         Channel channel = new Channel(pc.socket(), new DataInputStream(new ByteArrayInputStream(bytes.toByteArray())),
                 new DataOutputStream(new Sink(null)));
@@ -365,7 +418,7 @@ class ServerSessionProtocolEdgesTest {
     @Test
     void secondScreenInfoIsAProtocolViolationAndKeepsTheFirstSize() {
         ServerSession session = reserved(new Sink(null));
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        releasePrepare(session);
         assertFalse(session.lifecycle().isClosed());
 
         session.dispatch(Packet.screenInfo(1280, 720));
@@ -422,11 +475,11 @@ class ServerSessionProtocolEdgesTest {
         assertEquals(ServerPhase.RESERVED, session.phase());
 
         clock.set(s(5)); // reservedAt 0 + reserve 5 s
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        releasePrepare(session);
 
-        assertEquals(new Packet.SizePayload(1920, 1080), session.screen().orElseThrow(), "the size is still stored");
-        assertEquals(ServerPhase.RESERVED, session.phase(), "but the window is over: no activation");
-        assertTrue(session.activeAtNanos().isEmpty());
+        assertTrue(session.screen().isEmpty(), "late geometry must be discarded");
+        assertEquals(ServerPhase.CLOSING, session.phase(), "the reserve deadline wins before the next tick");
+        assertTrue(activationTime(session).isEmpty());
         session.tick(s(5)); // the ticker then closes it for what it is
         assertEquals("attach timeout", closeInfo(session).message());
         assertEquals(Packet.DisconnectReason.TIMEOUT, closeInfo(session).reason());
@@ -439,32 +492,18 @@ class ServerSessionProtocolEdgesTest {
      */
     @Test
     void screenInfoWaitingForSessionLockCannotActivateAfterReserveDeadline() throws Exception {
-        String dispatcherName = "test-dispatch-waiting-for-lock";
-        CountDownLatch packetTimestampRead = new CountDownLatch(1);
-        LongSupplier observedClock = () -> {
-            long now = clock.getAsLong();
-            if (Thread.currentThread().getName().equals(dispatcherName)) packetTimestampRead.countDown();
-            return now;
-        };
         Sink sink = new Sink(null);
-        ServerSession session = newSession(observedClock);
-        PendingConnection pc = new PendingConnection(new Socket(), 0);
-        assertTrue(session.attachCommandChannel(pc, cmdChannel(pc, sink), 0));
-        attachImage(session, 0); // only SCREEN_INFO is missing
-        ExecutorService dispatcher = Executors.newSingleThreadExecutor(r -> new Thread(r, dispatcherName));
-        try {
-            Future<?> dispatched = session.lifecycle().atomically(tx -> {
-                Future<?> f = dispatcher.submit(() -> session.dispatch(Packet.screenInfo(1920, 1080)));
-                awaitLatch(packetTimestampRead, "the dispatcher never read its packet timestamp");
-                clock.set(s(6)); // past reservedAt 0 + reserve 5 s, while the dispatcher still holds the old value
-                return f;
-            }); // the lock is released here
-            dispatched.get(WAIT_S, TimeUnit.SECONDS);
-        } finally {
-            dispatcher.shutdownNow();
-        }
-
-        assertEquals(new Packet.SizePayload(1920, 1080), session.screen().orElseThrow(), "the size is still stored");
+        ServerSession session = reserved(sink);
+        attachImage(session, 0);
+        awaitLatch(prepareStarted.get(session), "prepare entered its adapter before the lifecycle lock is held");
+        session.lifecycle().atomically(tx -> {
+            prepareGates.get(session).countDown();
+            awaitLatch(geometryRead.get(session), "geometry is read outside the lifecycle lock");
+            clock.set(s(6));
+            return null;
+        });
+        awaitHost(() -> session.closeInfo().isPresent());
+        assertTrue(session.screen().isEmpty(), "geometry prepared before the lock is stale at publication");
         assertStaysReservedUntilTheAttachTimeout(session, sink, s(6));
     }
 
@@ -475,18 +514,18 @@ class ServerSessionProtocolEdgesTest {
         attachImage(session, 0);
 
         clock.set(s(5) - 1); // reservedAt 0 + reserve 5 s, minus one nanosecond
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        releasePrepare(session);
 
         assertEquals(ServerPhase.ACTIVE, session.phase());
-        assertEquals(s(5) - 1, session.activeAtNanos().orElseThrow());
-        assertEquals(List.of(PacketType.SESSION_ACTIVE), awaitWritten(sink, 1));
+        assertEquals(s(5) - 1, activationTime(session).orElseThrow());
+        assertEquals(List.of(PacketType.SCREEN_INFO, PacketType.SESSION_ACTIVE), awaitWritten(sink, 2));
     }
 
     @Test
     void imageAttachCarryingAStaleTimestampCannotActivateAtTheReserveDeadline() throws Exception {
         Sink sink = new Sink(null);
         ServerSession session = reserved(sink);
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        releasePrepare(session);
 
         clock.set(s(5)); // exactly reservedAt 0 + reserve 5 s: equality means expired
         attachImage(session, 0); // admitted on the caller's timestamp from inside the window
@@ -498,7 +537,7 @@ class ServerSessionProtocolEdgesTest {
     void commandChannelAttachCarryingAStaleTimestampCannotActivateAtTheReserveDeadline() throws Exception {
         Sink sink = new Sink(null);
         ServerSession session = newSession();
-        session.dispatch(Packet.screenInfo(1920, 1080)); // no writer yet: stored, nothing to activate
+        prepareGates.get(session).countDown(); // preparation cannot start before the command handover
         attachImage(session, 0);
 
         clock.set(s(5)); // exactly reservedAt 0 + reserve 5 s: equality means expired
@@ -513,14 +552,14 @@ class ServerSessionProtocolEdgesTest {
         Sink sink = new Sink(null);
         ServerSession session = reserved(sink);
         clock.set(s(1));
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        releasePrepare(session);
 
         clock.set(s(2));
         attachImage(session, s(1)); // the caller read s(1) before it waited for the lock
 
         assertEquals(ServerPhase.ACTIVE, session.phase());
-        assertEquals(s(2), session.activeAtNanos().orElseThrow());
-        assertEquals(List.of(PacketType.SESSION_ACTIVE), awaitWritten(sink, 1));
+        assertEquals(s(2), activationTime(session).orElseThrow());
+        assertEquals(List.of(PacketType.SCREEN_INFO, PacketType.SESSION_ACTIVE), awaitWritten(sink, 2));
     }
 
     @Test
@@ -528,24 +567,26 @@ class ServerSessionProtocolEdgesTest {
         Sink sink = new Sink(null);
         ServerSession session = newSession();
         clock.set(s(1));
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        prepareGates.get(session).countDown();
         attachImage(session, s(1));
 
         clock.set(s(2));
         PendingConnection pc = new PendingConnection(new Socket(), s(1));
         assertTrue(session.attachCommandChannel(pc, cmdChannel(pc, sink), s(1))); // read before waiting for the lock
 
+        awaitHost(() -> session.phase() == ServerPhase.ACTIVE);
         assertEquals(ServerPhase.ACTIVE, session.phase());
-        assertEquals(s(2), session.activeAtNanos().orElseThrow());
-        assertEquals(List.of(PacketType.SESSION_ACTIVE), awaitWritten(sink, 1));
+        assertEquals(s(2), activationTime(session).orElseThrow());
+        assertEquals(List.of(PacketType.SCREEN_INFO, PacketType.SESSION_ACTIVE), awaitWritten(sink, 2));
     }
 
     @Test
     void activationThatDoesNotFitInTheQueueClosesWithOverflowAndNeverActivates() throws Exception {
         Sink sink = gatedSink();
         ServerSession session = reserved(sink);
-        fillWithPongs(session, sink);
-        session.dispatch(Packet.screenInfo(1920, 1080));
+        releasePrepare(session);
+        awaitEntered(sink); // SCREEN_INFO is the in-flight first write
+        for (int i = 0; i < CommandWriter.DEFAULT_CAPACITY; i++) session.dispatch(Packet.ping(i + 1));
 
         attachImage(session, 0); // both conditions are met; SESSION_ACTIVE has no room
 
@@ -553,126 +594,9 @@ class ServerSessionProtocolEdgesTest {
         assertEquals(Packet.DisconnectReason.OVERFLOW, info.reason());
         assertEquals("command queue overflow", info.message());
         assertEquals(ServerPhase.CLOSING, session.phase());
-        assertTrue(session.activeAtNanos().isEmpty(), "ACTIVE was never announced");
-    }
-
-    @Test
-    void epochAndActiveInstantAreEmptyUntilActive() {
-        ServerSession session = reserved(new Sink(null));
-        assertEquals(0, session.inputEpoch());
-        assertTrue(session.activeAtNanos().isEmpty());
-
-        clock.set(s(2));
-        session.dispatch(Packet.screenInfo(1920, 1080));
-        attachImage(session, s(2));
-
-        assertEquals(ServerPhase.ACTIVE, session.phase());
-        assertEquals(s(2), session.activeAtNanos().orElseThrow());
-        assertEquals(0, session.inputEpoch(), "ACTIVE with no stall yet is still revision 0");
-    }
-
-    // ---- frames ---------------------------------------------------------------------------------
-
-    @Test
-    void frameOfAnotherGenerationIsDropped() {
-        ServerSession session = active(new Sink(null));
-
-        session.publishFrame(2, image(), s(1)); // the session is generation 1
-
-        assertEquals(0, session.framesReceived());
-        assertTrue(session.latestFrame().isEmpty());
-        assertFalse(session.controlEnabled(), "a dropped frame cannot open the gate");
-    }
-
-    @Test
-    void frameBeforeActiveIsDropped() {
-        ServerSession session = reserved(new Sink(null));
-
-        session.publishFrame(1, image(), s(1));
-
-        assertEquals(0, session.framesReceived());
-        assertTrue(session.latestFrame().isEmpty());
-        assertEquals(ServerPhase.RESERVED, session.phase());
-    }
-
-    @Test
-    void frameAfterCloseIsDropped() {
-        ServerSession session = active(new Sink(null));
-        session.disconnect();
-
-        session.publishFrame(1, image(), s(1));
-
-        assertEquals(0, session.framesReceived());
-        assertTrue(session.latestFrame().isEmpty());
-    }
-
-    @Test
-    void tickOnAClosedActiveSessionDecidesNothingMore() {
-        ServerSession session = active(new Sink(null));
-        session.disconnect();
-        CloseInfo first = closeInfo(session);
-
-        session.tick(s(100)); // far past the frame timeout, but the session is already closing
-
-        assertSame(first, closeInfo(session), "the first close reason stays");
-        assertEquals(Packet.DisconnectReason.USER, first.reason());
-        assertEquals(0, session.releaseAllSent());
-        assertEquals(0, session.inputEpoch(), "no stall or timeout transition was recorded");
-    }
-
-    // ---- overflow on the paths that queue input -------------------------------------------------
-
-    @Test
-    void stallReleaseThatDoesNotFitClosesWithOverflow() throws Exception {
-        Sink sink = gatedSink();
-        ServerSession session = active(sink);
-        session.publishFrame(1, image(), s(1));
-        awaitEntered(sink);
-        fillWithInput(session);
-
-        session.tick(s(4)); // 3 s without a frame: the stall decision must queue RELEASE_ALL
-
-        CloseInfo info = closeInfo(session);
-        assertEquals(Packet.DisconnectReason.OVERFLOW, info.reason());
-        assertEquals(0, session.releaseAllSent(), "the RELEASE_ALL was not accepted");
-    }
-
-    @Test
-    void inputThatDoesNotFitClosesWithOverflow() throws Exception {
-        Sink sink = gatedSink();
-        ServerSession session = active(sink);
-        session.publishFrame(1, image(), s(1));
-        awaitEntered(sink);
-        fillWithInput(session);
-
-        assertEquals(CommandWriter.OfferResult.OVERFLOW, session.offerInput(Packet.keyPress(999)));
-
-        CloseInfo info = closeInfo(session);
-        assertEquals(Packet.DisconnectReason.OVERFLOW, info.reason());
-        assertEquals("command queue overflow", info.message());
-    }
-
-    @Test
-    void epochCheckedInputThatDoesNotFitClosesWithOverflow() throws Exception {
-        Sink sink = gatedSink();
-        ServerSession session = active(sink);
-        session.publishFrame(1, image(), s(1));
-        awaitEntered(sink);
-        fillWithInput(session);
-
-        assertEquals(InputOutcome.OVERFLOW, session.offerInput(0, Packet.keyPress(999)));
-
-        assertEquals(Packet.DisconnectReason.OVERFLOW, closeInfo(session).reason());
-    }
-
-    @Test
-    void releaseControlInputOnAClosedSessionReturnsClosed() {
-        ServerSession session = active(new Sink(null));
-        session.disconnect();
-
-        assertEquals(CommandWriter.OfferResult.CLOSED, session.releaseControlInput());
-
-        assertEquals(0, session.controlReleasesSent());
+        assertEquals(1, session.inputBeginCount(), "begin precedes the activation offer");
+        assertEquals(0, session.senderRuns());
+        session.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
     }
 
     // ---- reading what the writer produced ------------------------------------------------------
@@ -695,6 +619,230 @@ class ServerSessionProtocolEdgesTest {
             var p = PacketIO.read(in, Protocol.CMD_MAX_LEN, EnumSet.allOf(PacketType.class));
             if (p.isEmpty()) return types;
             types.add(p.get().type());
+        }
+    }
+
+    private void releasePrepare(ServerSession session) {
+        prepareGates.get(session).countDown();
+        awaitHost(() -> session.screen().isPresent() || session.closeInfo().isPresent());
+    }
+
+    private OptionalLong activationTime(ServerSession session) {
+        long value = activationTimes.get(session).get();
+        return value == Long.MIN_VALUE ? OptionalLong.empty() : OptionalLong.of(value);
+    }
+
+    private static void awaitHost(java.util.function.BooleanSupplier condition) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_S);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() < deadline, "Host worker did not finish its transaction");
+            LockSupport.parkNanos(1_000_000);
+        }
+    }
+
+    @Test void refusedInputSessionNeverSendsActivation() throws Exception {
+        assertTrue(hostResources.input.beginSession(1_000_000), "another session already owns the input");
+        try {
+            Sink sink = new Sink(null);
+            ServerSession session = reserved(sink);
+            releasePrepare(session);
+            attachImage(session, 0);
+            session.socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
+            CloseInfo info = closeInfo(session);
+            assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
+            assertEquals("input session refused", info.message());
+            assertTrue(info.sendDisconnect());
+            assertEquals(ServerPhase.CLOSING, session.phase());
+            assertEquals(0, session.inputBeginCount());
+            assertEquals(0, session.senderRuns());
+            session.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+            List<PacketType> types = writtenTypes(sink);
+            assertFalse(types.contains(PacketType.SESSION_ACTIVE));
+            assertEquals(PacketType.DISCONNECT, types.get(types.size() - 1));
+        } finally {
+            hostResources.input.endSession(1_000_000).get(WAIT_S, TimeUnit.SECONDS);
+        }
+    }
+
+    @RepeatedTest(20)
+    void closeRacingPrepareStartSkipsOrJoinsWorker() throws Exception {
+        for (boolean bodyEntered : new boolean[] {false, true}) {
+            CountDownLatch reached = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            gates.add(release);
+            java.util.concurrent.atomic.AtomicInteger refreshes = new java.util.concurrent.atomic.AtomicInteger();
+            java.util.concurrent.atomic.AtomicInteger sources = new java.util.concurrent.atomic.AtomicInteger();
+            hostResources.factory = new AdapterFactory() {
+                @Override public InputDevice inputDevice() { throw new AssertionError(); }
+                @Override public void refreshInputDevice() {
+                    refreshes.incrementAndGet();
+                    if (bodyEntered) { reached.countDown(); awaitGate(release); }
+                }
+                @Override public ScreenSource newScreenSource() {
+                    sources.incrementAndGet();
+                    return new FakeScreenSource(1920, 1080);
+                }
+            };
+            java.util.concurrent.ThreadFactory threads = runnable -> new Thread(() -> {
+                if (!bodyEntered && Thread.currentThread().getName().equals("rd-host-prepare")) {
+                    reached.countDown();
+                    awaitGate(release);
+                }
+                runnable.run();
+            });
+            ServerCore core = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0,
+                    TIMEOUTS, clock, new java.security.SecureRandom()), new ServerCore.Seams(threads, null, null, false));
+            core.start();
+            try (com.ltm.rd.it.RawPeer peer = com.ltm.rd.it.RawPeer.connect(core.cmdPort())) {
+                String code = core.sessions().currentCode();
+                peer.send(Packet.auth(code));
+                assertEquals(Packet.AuthStatus.OK, peer.read().authResultPayload().status());
+                assertTrue(reached.await(WAIT_S, TimeUnit.SECONDS));
+                ServerSession session = core.sessions().current().orElseThrow();
+                CloseInfo first = new CloseInfo(Packet.DisconnectReason.USER, "close won", false);
+                assertTrue(session.close(first));
+                session.socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
+                assertFalse(session.terminated().isDone());
+                assertSame(session, core.sessions().current().orElseThrow());
+                assertEquals(code, core.sessions().currentCode());
+                try (com.ltm.rd.it.RawPeer busy = com.ltm.rd.it.RawPeer.connect(core.cmdPort())) {
+                    busy.send(Packet.auth(code));
+                    assertEquals(Packet.AuthStatus.BUSY, busy.read().authResultPayload().status());
+                }
+                release.countDown();
+                session.terminated().get(WAIT_S, TimeUnit.SECONDS);
+                session.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+                awaitHost(() -> core.sessions().current().isEmpty());
+                assertSame(first, session.closeInfo().orElseThrow());
+                assertEquals(bodyEntered ? 1 : 0, refreshes.get());
+                assertEquals(bodyEntered ? 1 : 0, sources.get());
+                assertTrue(session.screen().isEmpty());
+                assertEquals(0, session.inputBeginCount());
+                assertEquals(0, session.senderRuns());
+            } finally { release.countDown(); core.close(); }
+            assertEquals(0, core.tickerRegistrations());
+        }
+        hostResources.factory = null;
+    }
+
+    private static void awaitGate(CountDownLatch gate) {
+        boolean interrupted = false;
+        while (gate.getCount() != 0) {
+            try { gate.await(); } catch (InterruptedException e) { interrupted = true; }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    @RepeatedTest(20)
+    void reserveDeadlineRacingPrepareDiscardsExpiredResult() throws Exception {
+        for (boolean expired : new boolean[] {false, true}) {
+            clock.set(0);
+            Sink sink = new Sink(null);
+            ServerSession session = reserved(sink);
+            attachImage(session, 0);
+            clock.set(s(5) - (expired ? 0 : 1));
+            releasePrepare(session);
+            if (expired) {
+                assertEquals(Packet.DisconnectReason.TIMEOUT, closeInfo(session).reason());
+                assertEquals("attach timeout", closeInfo(session).message());
+                assertTrue(session.screen().isEmpty());
+                assertTrue(activationTime(session).isEmpty());
+                assertEquals(0, session.inputBeginCount());
+                assertFalse(writtenTypes(sink).contains(PacketType.SESSION_ACTIVE));
+            } else {
+                assertEquals(ServerPhase.ACTIVE, session.phase());
+                assertEquals(1, session.inputBeginCount());
+                assertEquals(List.of(PacketType.SCREEN_INFO, PacketType.SESSION_ACTIVE), awaitWritten(sink, 2));
+                session.disconnect();
+            }
+            session.terminated().get(WAIT_S, TimeUnit.SECONDS);
+            session.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+        }
+    }
+
+    @RepeatedTest(20)
+    void attachRacingPrepareActivatesExactlyOnce() throws Exception {
+        assertPrepareAndAttachInEitherOrder();
+    }
+
+    @RepeatedTest(20)
+    void prepareAndAttachInEitherOrderActivateOnce() throws Exception {
+        assertPrepareAndAttachInEitherOrder();
+    }
+
+    private void assertPrepareAndAttachInEitherOrder() throws Exception {
+        for (boolean attachFirst : new boolean[] {true, false}) {
+            clock.set(0);
+            Sink sink = new Sink(null);
+            ServerSession session = reserved(sink);
+            java.util.concurrent.CyclicBarrier start = new java.util.concurrent.CyclicBarrier(2);
+            CountDownLatch first = new CountDownLatch(1);
+            ExecutorService triggers = Executors.newFixedThreadPool(2);
+            try {
+                Future<?> attach = triggers.submit(() -> {
+                    start.await(WAIT_S, TimeUnit.SECONDS);
+                    if (!attachFirst) assertTrue(first.await(WAIT_S, TimeUnit.SECONDS));
+                    attachImage(session, 0);
+                    if (attachFirst) { assertEquals(ServerPhase.RESERVED, session.phase()); first.countDown(); }
+                    return null;
+                });
+                Future<?> prepare = triggers.submit(() -> {
+                    start.await(WAIT_S, TimeUnit.SECONDS);
+                    if (attachFirst) assertTrue(first.await(WAIT_S, TimeUnit.SECONDS));
+                    releasePrepare(session);
+                    if (!attachFirst) { assertEquals(ServerPhase.RESERVED, session.phase()); first.countDown(); }
+                    return null;
+                });
+                attach.get(WAIT_S, TimeUnit.SECONDS);
+                prepare.get(WAIT_S, TimeUnit.SECONDS);
+                assertEquals(ServerPhase.ACTIVE, session.phase());
+                awaitHost(() -> session.senderRuns() == 1);
+                assertEquals(1, session.inputBeginCount());
+                assertEquals(1, session.senderRuns());
+                assertEquals(List.of(PacketType.SCREEN_INFO, PacketType.SESSION_ACTIVE), awaitWritten(sink, 2));
+            } finally { first.countDown(); triggers.shutdownNow(); session.disconnect(); }
+            session.terminated().get(WAIT_S, TimeUnit.SECONDS);
+            session.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+        }
+    }
+
+    private static Packet packet(com.ltm.rd.common.PacketType type) {
+        return switch (type) {
+            case AUTH -> Packet.auth("123456");
+            case AUTH_RESULT -> Packet.authResult(Packet.AuthStatus.OK, new byte[16]);
+            case ATTACH -> Packet.attach(new byte[16]);
+            case SCREEN_INFO -> Packet.screenInfo(1920, 1080);
+            case SESSION_ACTIVE -> Packet.sessionActive();
+            case FRAME -> Packet.frame(1, 1, new byte[] {1});
+            case MOUSE_MOVE -> Packet.mouseMove(1, 1);
+            case MOUSE_PRESS -> Packet.mousePress(1, 1, 1);
+            case MOUSE_RELEASE -> Packet.mouseRelease(1, 1, 1);
+            case WHEEL -> Packet.wheel(1);
+            case KEY_PRESS -> Packet.keyPress(65);
+            case KEY_RELEASE -> Packet.keyRelease(65);
+            case RELEASE_ALL -> Packet.releaseAll();
+            case PING -> Packet.ping(1);
+            case PONG -> Packet.pong(1);
+            case DISCONNECT -> Packet.disconnect(Packet.DisconnectReason.USER, "test");
+        };
+    }
+
+    @Test void listenerRejectsEveryDisallowedCommandType() throws Exception {
+        var pending = EnumSet.of(PacketType.PING, PacketType.PONG, PacketType.DISCONNECT);
+        var active = EnumSet.of(PacketType.MOUSE_MOVE, PacketType.MOUSE_PRESS, PacketType.MOUSE_RELEASE,
+                PacketType.WHEEL, PacketType.KEY_PRESS, PacketType.KEY_RELEASE, PacketType.RELEASE_ALL,
+                PacketType.PING, PacketType.PONG, PacketType.DISCONNECT);
+        for (boolean activated : new boolean[] {false, true}) {
+            for (PacketType type : PacketType.values()) {
+                if ((activated ? active : pending).contains(type)) continue;
+                clock.set(0);
+                ServerSession session = activated ? active(new Sink(null)) : reserved(new Sink(null));
+                session.dispatch(packet(type));
+                assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, session.closeInfo().orElseThrow().reason(), type.name());
+                assertEquals(ServerPhase.CLOSING, session.phase());
+                session.terminated().get(WAIT_S, TimeUnit.SECONDS);
+                session.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+            }
         }
     }
 }

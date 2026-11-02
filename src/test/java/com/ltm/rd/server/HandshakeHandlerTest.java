@@ -76,23 +76,27 @@ class HandshakeHandlerTest {
         pending = new PendingConnections(TIMEOUTS.handshake());
     }
 
+
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
+
     @AfterEach
     void tearDown() throws IOException {
         for (Socket s : sockets) s.close();
         listener.close();
         scheduler.shutdownNow();
         cleanup.shutdownNow();
+        hostResources.close();
     }
 
     private ServerSession newSession(long generation, byte[] token, InetAddress peer, long reservedAt) {
         SessionLifecycle<ServerPhase> lifecycle = new SessionLifecycle<>(ServerPhase.RESERVED, ServerPhase.CLOSING,
                 System::nanoTime, Duration.ofMillis(50), scheduler, cleanup);
-        ServerSession.Env env = new ServerSession.Env(TIMEOUTS, clock, null, () -> false, null, false);
+        ServerSession.Env env = hostResources.env(TIMEOUTS, clock, null, () -> false, null, null);
         return new ServerSession(generation, token, peer, reservedAt, lifecycle, env);
     }
 
     private HandshakeHandler handler(LongSupplier handlerClock, Consumer<ServerSession> onReserved) {
-        return new HandshakeHandler(sessions, pending, TIMEOUTS, handlerClock, onReserved, null);
+        return new HandshakeHandler(sessions, pending, TIMEOUTS, handlerClock, onReserved, null, java.util.function.UnaryOperator.identity());
     }
 
     /** One accepted connection: {@code client} is the peer's end, {@code pc} the server's. */

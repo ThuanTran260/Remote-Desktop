@@ -1,7 +1,7 @@
 package com.ltm.rd.ui;
 
-import com.ltm.rd.host.AdapterException;
 import com.ltm.rd.common.Packet;
+import com.ltm.rd.host.AdapterException;
 import java.net.BindException;
 import java.net.ConnectException;
 import java.net.NoRouteToHostException;
@@ -25,13 +25,19 @@ public final class Messages {
 
     private Messages() {}
 
+    public static String forShutdown(ShutdownReport report) {
+        if (report != null && report.socketsClosed() && report.workersStopped()
+                && (report.inputRelease() == InputRelease.NOT_NEEDED || report.inputRelease() == InputRelease.RELEASED)) return "";
+        return "Chưa xác nhận dọn sạch kết nối, luồng và phím/chuột. Hãy kiểm tra máy Host trước khi tiếp tục.";
+    }
+
     public static String forAuth(Packet.AuthStatus status) {
         return switch (status) {
             case OK -> "";
             case WRONG_CODE -> "Mã không đúng.";
-            case BUSY -> "Máy chủ đang có phiên khác.";
+            case BUSY -> "Host đang có phiên khác hoặc đang dọn phiên trước. Hãy thử lại sau.";
             case LOCKED -> "Bị khóa tạm thời do nhập sai nhiều lần. Thử lại sau 30 giây.";
-            case BAD_VERSION -> "Phiên bản không tương thích.";
+            case BAD_VERSION -> "Phiên bản khác nhau. Hãy dùng cùng một bản jar trên hai máy.";
         };
     }
 
@@ -57,7 +63,7 @@ public final class Messages {
         }
         if (cause instanceof ConnectException || cause instanceof NoRouteToHostException
                 || cause instanceof UnknownHostException) {
-            return "Không kết nối được tới máy chủ. Kiểm tra IP, cổng và tường lửa.";
+            return "Không kết nối được tới Host. Kiểm tra IP, cổng và tường lửa.";
         }
         if (cause instanceof AdapterException a) {
             return switch (a.kind()) {

@@ -19,22 +19,21 @@ class PacketRulesTest {
     private record Row(PacketRules.Shell shell, PacketRules.Lane lane, PacketRules.Stage stage,
             Set<PacketType> expected) { }
 
-    // Independent, literal v1 specification: do not derive expected sets from production rules.
+    // Independent, literal v2 specification: do not derive expected sets from production rules.
     private static final List<Row> ROWS = List.of(
             new Row(LISTENER, COMMAND, HANDSHAKE, Set.of(AUTH)),
-            new Row(LISTENER, COMMAND, PENDING, Set.of(SCREEN_INFO, PING, PONG, DISCONNECT)),
-            new Row(LISTENER, COMMAND, ACTIVE, Set.of(PING, PONG, DISCONNECT)),
+            new Row(LISTENER, COMMAND, PENDING, Set.of(PING, PONG, DISCONNECT)),
+            new Row(LISTENER, COMMAND, ACTIVE, Set.of(PING, PONG, DISCONNECT,
+                    MOUSE_MOVE, MOUSE_PRESS, MOUSE_RELEASE, WHEEL, KEY_PRESS, KEY_RELEASE, RELEASE_ALL)),
             new Row(LISTENER, IMAGE, HANDSHAKE, Set.of(ATTACH)),
             new Row(LISTENER, IMAGE, PENDING, Set.of()),
-            new Row(LISTENER, IMAGE, ACTIVE, Set.of(FRAME)),
+            new Row(LISTENER, IMAGE, ACTIVE, Set.of()),
             new Row(CONNECTOR, COMMAND, HANDSHAKE, Set.of(AUTH_RESULT)),
-            new Row(CONNECTOR, COMMAND, PENDING, Set.of(SESSION_ACTIVE, PING, PONG, DISCONNECT,
-                    MOUSE_MOVE, MOUSE_PRESS, MOUSE_RELEASE, WHEEL, KEY_PRESS, KEY_RELEASE, RELEASE_ALL)),
-            new Row(CONNECTOR, COMMAND, ACTIVE, Set.of(PING, PONG, DISCONNECT,
-                    MOUSE_MOVE, MOUSE_PRESS, MOUSE_RELEASE, WHEEL, KEY_PRESS, KEY_RELEASE, RELEASE_ALL)),
+            new Row(CONNECTOR, COMMAND, PENDING, Set.of(SCREEN_INFO, SESSION_ACTIVE, PING, PONG, DISCONNECT)),
+            new Row(CONNECTOR, COMMAND, ACTIVE, Set.of(PING, PONG, DISCONNECT)),
             new Row(CONNECTOR, IMAGE, HANDSHAKE, Set.of()),
             new Row(CONNECTOR, IMAGE, PENDING, Set.of()),
-            new Row(CONNECTOR, IMAGE, ACTIVE, Set.of()));
+            new Row(CONNECTOR, IMAGE, ACTIVE, Set.of(FRAME)));
 
     static Stream<Arguments> everyCombination() {
         return Arrays.stream(PacketRules.Shell.values()).flatMap(shell ->
@@ -46,7 +45,7 @@ class PacketRulesTest {
 
     @ParameterizedTest
     @MethodSource("everyCombination")
-    void everyTypeMatchesTheLiteralV1Table(PacketRules.Shell shell, PacketRules.Lane lane,
+    void everyTypeMatchesTheLiteralV2Table(PacketRules.Shell shell, PacketRules.Lane lane,
             PacketRules.Stage stage, PacketType type) {
         Set<PacketType> expected = ROWS.stream()
                 .filter(row -> row.shell == shell && row.lane == lane && row.stage == stage)
@@ -69,12 +68,12 @@ class PacketRulesTest {
     }
 
     @Test
-    void readableAfterHandshakeEqualsTheOldReaderSets() {
-        assertReader(LISTENER, COMMAND, Set.of(SCREEN_INFO, PING, PONG, DISCONNECT));
-        assertReader(LISTENER, IMAGE, Set.of(FRAME));
-        assertReader(CONNECTOR, COMMAND, Set.of(SESSION_ACTIVE, PING, PONG, DISCONNECT,
+    void readableAfterHandshakeMatchesV2Unions() {
+        assertReader(LISTENER, COMMAND, Set.of(PING, PONG, DISCONNECT,
                 MOUSE_MOVE, MOUSE_PRESS, MOUSE_RELEASE, WHEEL, KEY_PRESS, KEY_RELEASE, RELEASE_ALL));
-        assertReader(CONNECTOR, IMAGE, Set.of());
+        assertReader(LISTENER, IMAGE, Set.of());
+        assertReader(CONNECTOR, COMMAND, Set.of(SCREEN_INFO, SESSION_ACTIVE, PING, PONG, DISCONNECT));
+        assertReader(CONNECTOR, IMAGE, Set.of(FRAME));
     }
 
     private static void assertReader(PacketRules.Shell shell, PacketRules.Lane lane, Set<PacketType> expected) {

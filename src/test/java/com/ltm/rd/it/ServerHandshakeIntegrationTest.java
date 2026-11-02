@@ -49,10 +49,14 @@ class ServerHandshakeIntegrationTest {
     private final List<ServerCore> cores = new ArrayList<>();
     private final List<Raw> raws = new ArrayList<>();
 
+
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
+
     @AfterEach
     void cleanup() {
         for (Raw r : raws) r.close();
         for (ServerCore c : cores) c.close();
+        hostResources.close();
     }
 
     // ---- fixtures --------------------------------------------------------------------------
@@ -84,10 +88,50 @@ class ServerHandshakeIntegrationTest {
     }
 
     private ServerCore core(Timeouts t) throws IOException {
-        ServerCore c = new ServerCore(config(t, 0, 0));
+        ServerCore c = hostResources.core(config(t, 0, 0));
         cores.add(c);
         c.start();
         return c;
+    }
+
+    @Test
+    void acceptedAndConnectedSocketsUseV2Options() throws Exception {
+        var decorated = new java.util.concurrent.atomic.AtomicInteger();
+        Timeouts t = timeouts(Duration.ofSeconds(20));
+        ServerCore host = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, t,
+                System::nanoTime, new SecureRandom(), out -> { decorated.incrementAndGet(); return out; }));
+        cores.add(host);
+        host.start();
+        var scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        var cleanup = java.util.concurrent.Executors.newCachedThreadPool();
+        var ticker = new com.ltm.rd.common.Ticker(t.tick(), System::nanoTime);
+        var connected = new java.util.concurrent.CopyOnWriteArrayList<Socket>();
+        var viewer = new com.ltm.rd.client.ClientSession(new com.ltm.rd.client.ClientConfig("127.0.0.1",
+                host.cmdPort(), host.imgPort(), host.sessions().currentCode(), t, System::nanoTime), 1,
+                (socket, address, timeout) -> {
+                    assertTrue(socket.getTcpNoDelay(), "connector configures the socket before connecting");
+                    socket.connect(address, timeout);
+                    connected.add(socket);
+                }, com.ltm.rd.client.ClientHooks.none(), ticker, scheduler, cleanup);
+        try {
+            viewer.start();
+            viewer.activated().get(WAIT_S, TimeUnit.SECONDS);
+            ServerSession session = host.sessions().current().orElseThrow();
+            assertEquals(2, connected.size());
+            assertEquals(1, decorated.get(), "only the Host image output uses its decorator");
+            for (boolean image : new boolean[] {false, true}) {
+                Socket connector = com.ltm.rd.client.ClientTestAccess.channelSocket(viewer, image);
+                assertSame(connected.get(image ? 1 : 0), connector);
+                assertTrue(connector.getTcpNoDelay());
+                assertTrue(ServerTestAccess.channelSocket(session, image).getTcpNoDelay());
+            }
+        } finally {
+            viewer.cancel();
+            viewer.terminated().get(WAIT_S, TimeUnit.SECONDS);
+            ticker.close();
+            scheduler.shutdownNow();
+            cleanup.shutdownNow();
+        }
     }
 
     /** Raw protocol client: speaks PacketIO directly, no session logic. */
@@ -223,7 +267,7 @@ class ServerHandshakeIntegrationTest {
     }
 
     private void activate(ServerCore c, Authed a) throws IOException {
-        a.cmd().send(Packet.screenInfo(1920, 1080));
+        assertEquals(Packet.screenInfo(1920, 1080), a.cmd().readUntil(PacketType.SCREEN_INFO));
         raw(c.imgPort()).send(Packet.attach(a.token()));
         a.cmd().readUntil(PacketType.SESSION_ACTIVE);
     }
@@ -235,7 +279,7 @@ class ServerHandshakeIntegrationTest {
         ServerCore c = core(fast());
         Authed a = auth(c);
         assertEquals(Protocol.TOKEN_LEN, a.token().length);
-        a.cmd().send(Packet.screenInfo(1920, 1080));
+        assertEquals(Packet.screenInfo(1920, 1080), a.cmd().readUntil(PacketType.SCREEN_INFO));
         raw(c.imgPort()).send(Packet.attach(a.token()));
         a.cmd().readUntil(PacketType.SESSION_ACTIVE);
         ServerSession s = session(c);
@@ -245,12 +289,28 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void attachBeforeScreenInfoAlsoActivates() throws Exception {
-        ServerCore c = core(fast());
-        Authed a = auth(c);
-        raw(c.imgPort()).send(Packet.attach(a.token()));
-        a.cmd().send(Packet.screenInfo(1280, 720));
-        a.cmd().readUntil(PacketType.SESSION_ACTIVE);
-        assertEquals(ServerPhase.ACTIVE, session(c).phase());
+        CountDownLatch preparing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        hostResources.factory = new com.ltm.rd.host.AdapterFactory() {
+            @Override public com.ltm.rd.host.InputDevice inputDevice() { throw new AssertionError(); }
+            @Override public void refreshInputDevice() {
+                preparing.countDown();
+                try { release.await(); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
+            }
+            @Override public com.ltm.rd.host.ScreenSource newScreenSource() { return new com.ltm.rd.host.FakeScreenSource(1280, 720); }
+        };
+        try {
+            ServerCore c = core(fast());
+            Authed a = auth(c);
+            assertTrue(preparing.await(WAIT_S, TimeUnit.SECONDS));
+            raw(c.imgPort()).send(Packet.attach(a.token()));
+            assertEquals(ServerPhase.RESERVED, session(c).phase());
+            release.countDown();
+            assertEquals(Packet.screenInfo(1280, 720), a.cmd().readUntil(PacketType.SCREEN_INFO));
+            a.cmd().readUntil(PacketType.SESSION_ACTIVE);
+            assertEquals(ServerPhase.ACTIVE, session(c).phase());
+        } finally { release.countDown(); hostResources.factory = null; }
     }
 
     @Test
@@ -359,7 +419,7 @@ class ServerHandshakeIntegrationTest {
         ServerCore c = core(timeouts(Duration.ofSeconds(5)));
         Authed a = auth(c);
         Raw bad = raw(c.imgPort());
-        bad.send(Packet.attach(2, a.token()));
+        bad.send(Packet.attach(1, a.token()));
         bad.awaitEndMs(System.nanoTime());
         assertEquals(ServerPhase.RESERVED, session(c).phase());
         activate(c, a); // same token, right version
@@ -449,7 +509,7 @@ class ServerHandshakeIntegrationTest {
             freeCmdPort = probe.getLocalPort();
         }
         try (ServerSocket occupied = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
-            ServerCore c = new ServerCore(config(fast(), freeCmdPort, occupied.getLocalPort()));
+            ServerCore c = hostResources.core(config(fast(), freeCmdPort, occupied.getLocalPort()));
             cores.add(c);
             assertThrows(IOException.class, c::start);
         }
@@ -466,8 +526,10 @@ class ServerHandshakeIntegrationTest {
         CloseRecorder rec = new CloseRecorder(s);
         raw(c.imgPort()).send(Packet.attach(a.token())); // ATTACH is not a counted command packet
         long lastCountedAt = System.nanoTime(); // stamped just before the last packet the server counts
-        a.cmd().send(Packet.screenInfo(1920, 1080));
+        assertEquals(Packet.screenInfo(1920, 1080), a.cmd().readUntil(PacketType.SCREEN_INFO));
         a.cmd().readUntil(PacketType.SESSION_ACTIVE);
+        lastCountedAt = System.nanoTime();
+        a.cmd().send(Packet.pong(1));
         // the client now stays silent and never answers PING
         rec.await();
         assertEquals("liveness timeout", rec.info.message());
@@ -554,9 +616,25 @@ class ServerHandshakeIntegrationTest {
         Authed a = auth(c);
         activate(c, a);
         ServerSession s = session(c);
-        awaitTrue(() -> c.tickerRegistrations() == baseline + 3, "session, heartbeat and watchdog registrations");
+        awaitTrue(() -> c.tickerRegistrations() == baseline + 4, "session, heartbeat and both write watchdog registrations");
         a.cmd().send(Packet.disconnect(Packet.DisconnectReason.USER, "bye"));
         ServerTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
         assertEquals(baseline, c.tickerRegistrations());
+    }
+
+    @Test void v1AuthGetsBadVersionWithoutGuardMutation() throws Exception {
+        ServerCore core = core(fast());
+        String code = core.sessions().currentCode();
+        for (int i = 0; i < 3; i++) {
+            Raw old = raw(core.cmdPort());
+            old.send(Packet.auth(1, wrongCode(core)));
+            assertEquals(Packet.AuthStatus.BAD_VERSION, old.read().authResultPayload().status());
+            old.awaitEndMs(System.nanoTime());
+            assertTrue(core.sessions().current().isEmpty());
+            assertEquals(code, core.sessions().currentCode());
+        }
+        Authed accepted = auth(core);
+        assertEquals(16, accepted.token().length);
+        assertEquals(ServerPhase.RESERVED, session(core).phase());
     }
 }

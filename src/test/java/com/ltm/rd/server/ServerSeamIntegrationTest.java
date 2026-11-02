@@ -33,10 +33,14 @@ class ServerSeamIntegrationTest {
     private final List<ServerCore> cores = new ArrayList<>();
     private final List<RawPeer> peers = new ArrayList<>();
 
+
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
+
     @AfterEach
     void cleanup() {
         peers.forEach(RawPeer::close);
         cores.forEach(ServerCore::close);
+        hostResources.close();
     }
 
     private static Timeouts timeouts(Duration handshake, Duration reserve) {
@@ -48,7 +52,7 @@ class ServerSeamIntegrationTest {
     }
 
     private ServerCore core(Timeouts t, ServerCore.Seams seams) throws IOException {
-        ServerCore c = new ServerCore(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, t, System::nanoTime,
+        ServerCore c = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, t, System::nanoTime,
                 new SecureRandom()), seams);
         cores.add(c);
         c.start();
@@ -199,7 +203,7 @@ class ServerSeamIntegrationTest {
 
     @Test
     void startAfterCloseIsRefused() throws Exception {
-        ServerCore c = new ServerCore(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0,
+        ServerCore c = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0,
                 timeouts(Duration.ofSeconds(1), Duration.ofSeconds(1)), System::nanoTime, new SecureRandom()));
         cores.add(c);
         c.close();

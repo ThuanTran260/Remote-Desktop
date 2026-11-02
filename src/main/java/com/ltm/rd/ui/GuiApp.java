@@ -1,7 +1,7 @@
 package com.ltm.rd.ui;
 
-import com.ltm.rd.Launcher;
 import com.ltm.rd.LaunchOptions;
+import com.ltm.rd.Launcher;
 import com.ltm.rd.host.RobotAdapterFactory;
 import java.awt.EventQueue;
 import java.util.List;
@@ -33,7 +33,7 @@ public final class GuiApp {
                 RoleChooserFrame[] chooser = new RoleChooserFrame[1];
                 chooser[0] = new RoleChooserFrame(role -> {
                     // start the non-daemon init thread before the chooser goes away, so no gap exists
-                    openRole(new LaunchOptions(role, false, options.cmdPort(), options.imgPort(), options.host()));
+                    openRole(new LaunchOptions(role, false, options.cmdPort(), options.imgPort(), options.address()));
                     chooser[0].dispose();
                 }, () -> System.exit(0));
                 chooser[0].setVisible(true);
@@ -47,19 +47,23 @@ public final class GuiApp {
 
     private static void openRole(LaunchOptions options) {
         Thread init = new Thread(() -> {
+            AppRuntime created = null;
             try {
                 AppConfig cfg = AppConfig.from(options);
-                if (options.role() == LaunchOptions.Role.SERVER) {
-                    AppRuntime runtime = AppRuntime.forServer(cfg);
+                if (options.role() == LaunchOptions.Role.HOST) {
+                    created = AppRuntime.forHost(cfg, new RobotAdapterFactory());
+                    AppRuntime runtime = created;
                     List<String> addresses = LocalAddresses.ipv4();
                     EventQueue.invokeLater(() -> showServer(runtime, addresses));
                 } else {
-                    AppRuntime runtime = AppRuntime.forClient(cfg, new RobotAdapterFactory());
-                    EventQueue.invokeLater(() -> showClient(runtime, options.host()));
+                    created = AppRuntime.forViewer(cfg);
+                    AppRuntime runtime = created;
+                    EventQueue.invokeLater(() -> showClient(runtime, options.address()));
                 }
             } catch (Throwable t) {
                 String text = Messages.forThrowable(t);
-                EventQueue.invokeLater(() -> fail(text));
+                if (created == null) EventQueue.invokeLater(() -> fail(text));
+                else rollback(created, text);
             }
         }, "rd-gui-init");
         // non-daemon: keeps the JVM alive until the role window is shown (AWT auto-shutdown otherwise)
@@ -71,9 +75,9 @@ public final class GuiApp {
         try {
             ServerFrame frame = new ServerFrame(runtime, addresses, () -> exitAfterShutdown(runtime));
             frame.setVisible(true);
-            runtime.startServer(); // a failure shows up as FAILED in the next snapshot
+            runtime.startHost(); // a failure shows up as FAILED in the next snapshot
         } catch (Throwable t) {
-            fail(Messages.forThrowable(t));
+            rollback(runtime, Messages.forThrowable(t));
         }
     }
 
@@ -82,7 +86,7 @@ public final class GuiApp {
             ClientFrame frame = new ClientFrame(runtime, presetHost, () -> exitAfterShutdown(runtime));
             frame.setVisible(true);
         } catch (Throwable t) {
-            fail(Messages.forThrowable(t));
+            rollback(runtime, Messages.forThrowable(t));
         }
     }
 
@@ -93,6 +97,29 @@ public final class GuiApp {
 
     /** The shutdown runs on {@code rd-shutdown}; the EDT only starts it. */
     private static void exitAfterShutdown(AppRuntime runtime) {
-        runtime.shutdownAsync().whenComplete((report, error) -> System.exit(0));
+        exitAfterShutdown(runtime, GuiApp::warnShutdown, () -> System.exit(0));
+    }
+
+    static void exitAfterShutdown(Controller controller, java.util.function.Consumer<String> warning, Runnable exit) {
+        try {
+            controller.shutdownAsync().whenComplete((report, error) -> EventQueue.invokeLater(() -> {
+                String text = Messages.forShutdown(error == null ? report : null);
+                try { if (!text.isEmpty()) warning.accept(text); }
+                finally { exit.run(); }
+            }));
+        } catch (Throwable failure) {
+            EventQueue.invokeLater(() -> {
+                try { warning.accept(Messages.forShutdown(null)); }
+                finally { exit.run(); }
+            });
+        }
+    }
+
+    private static void warnShutdown(String text) {
+        JOptionPane.showMessageDialog(null, text, "Chưa xác nhận dọn sạch", JOptionPane.WARNING_MESSAGE);
+    }
+
+    private static void rollback(AppRuntime runtime, String text) {
+        exitAfterShutdown(runtime, GuiApp::warnShutdown, () -> fail(text));
     }
 }

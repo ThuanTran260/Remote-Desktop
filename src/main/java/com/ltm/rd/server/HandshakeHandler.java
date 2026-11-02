@@ -4,20 +4,22 @@ import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
-import com.ltm.rd.common.PacketRules;
 import com.ltm.rd.common.PacketRules.Lane;
 import com.ltm.rd.common.PacketRules.Shell;
 import com.ltm.rd.common.PacketRules.Stage;
+import com.ltm.rd.common.PacketRules;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.common.TrafficCounter;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
+import java.util.function.UnaryOperator;
 
 /**
  * Handshake of one accepted socket, run on a pool thread. {@code Channel.wrap} is called once,
@@ -35,21 +37,25 @@ final class HandshakeHandler {
     private final LongSupplier clock;
     private final Consumer<ServerSession> onReserved;
     private final Runnable beforeAttachImage; // test seam, may be null
+    private final UnaryOperator<OutputStream> imageOutputDecorator;
 
     /** {@code onReserved} runs right after a successful reservation, before AUTH_RESULT is sent. */
     HandshakeHandler(SessionManager sessions, PendingConnections pending, Timeouts timeouts, LongSupplier clock,
-            Consumer<ServerSession> onReserved, Runnable beforeAttachImage) {
+            Consumer<ServerSession> onReserved, Runnable beforeAttachImage,
+            UnaryOperator<OutputStream> imageOutputDecorator) {
         this.sessions = sessions;
         this.pending = pending;
         this.timeouts = timeouts;
         this.clock = clock;
         this.onReserved = onReserved;
         this.beforeAttachImage = beforeAttachImage;
+        this.imageOutputDecorator = imageOutputDecorator;
     }
 
     void handle(Kind kind, PendingConnection pc) {
         try {
-            Channel ch = Channel.wrap(pc.socket(), new TrafficCounter());
+            Channel ch = Channel.wrap(pc.socket(), new TrafficCounter(),
+                    kind == Kind.IMAGE ? imageOutputDecorator : UnaryOperator.identity());
             if (kind == Kind.COMMAND) handleCommand(pc, ch);
             else handleImage(pc, ch);
         } catch (Throwable e) { // incl. ProtocolException: only this connection ends

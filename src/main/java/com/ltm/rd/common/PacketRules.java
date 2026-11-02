@@ -7,7 +7,7 @@ import java.util.EnumSet;
 import java.util.Map;
 import java.util.Set;
 
-/** The v1 receive filters; payload validation and one-time checks belong to the session. */
+/** The v2 receive filters; payload validation and one-time checks belong to the session. */
 public final class PacketRules {
     public enum Shell { LISTENER, CONNECTOR }
     public enum Lane { COMMAND, IMAGE }
@@ -18,25 +18,23 @@ public final class PacketRules {
     private static final Map<Key, Set<PacketType>> TABLE = Map.ofEntries(
             entry(new Key(Shell.LISTENER, Lane.COMMAND, Stage.HANDSHAKE), Set.of(PacketType.AUTH)),
             entry(new Key(Shell.LISTENER, Lane.COMMAND, Stage.PENDING),
-                    Set.of(PacketType.SCREEN_INFO, PacketType.PING, PacketType.PONG, PacketType.DISCONNECT)),
-            entry(new Key(Shell.LISTENER, Lane.COMMAND, Stage.ACTIVE),
                     Set.of(PacketType.PING, PacketType.PONG, PacketType.DISCONNECT)),
-            entry(new Key(Shell.LISTENER, Lane.IMAGE, Stage.HANDSHAKE), Set.of(PacketType.ATTACH)),
-            entry(new Key(Shell.LISTENER, Lane.IMAGE, Stage.PENDING), Set.of()),
-            entry(new Key(Shell.LISTENER, Lane.IMAGE, Stage.ACTIVE), Set.of(PacketType.FRAME)),
-            entry(new Key(Shell.CONNECTOR, Lane.COMMAND, Stage.HANDSHAKE), Set.of(PacketType.AUTH_RESULT)),
-            // Pending input deliberately reaches CommandReceiver's v1 "input before session active" check.
-            entry(new Key(Shell.CONNECTOR, Lane.COMMAND, Stage.PENDING),
-                    Set.of(PacketType.SESSION_ACTIVE, PacketType.PING, PacketType.PONG, PacketType.DISCONNECT,
-                            PacketType.MOUSE_MOVE, PacketType.MOUSE_PRESS, PacketType.MOUSE_RELEASE, PacketType.WHEEL,
-                            PacketType.KEY_PRESS, PacketType.KEY_RELEASE, PacketType.RELEASE_ALL)),
-            entry(new Key(Shell.CONNECTOR, Lane.COMMAND, Stage.ACTIVE),
+            entry(new Key(Shell.LISTENER, Lane.COMMAND, Stage.ACTIVE),
                     Set.of(PacketType.PING, PacketType.PONG, PacketType.DISCONNECT,
                             PacketType.MOUSE_MOVE, PacketType.MOUSE_PRESS, PacketType.MOUSE_RELEASE, PacketType.WHEEL,
                             PacketType.KEY_PRESS, PacketType.KEY_RELEASE, PacketType.RELEASE_ALL)),
+            entry(new Key(Shell.LISTENER, Lane.IMAGE, Stage.HANDSHAKE), Set.of(PacketType.ATTACH)),
+            entry(new Key(Shell.LISTENER, Lane.IMAGE, Stage.PENDING), Set.of()),
+            entry(new Key(Shell.LISTENER, Lane.IMAGE, Stage.ACTIVE), Set.of()),
+            entry(new Key(Shell.CONNECTOR, Lane.COMMAND, Stage.HANDSHAKE), Set.of(PacketType.AUTH_RESULT)),
+            entry(new Key(Shell.CONNECTOR, Lane.COMMAND, Stage.PENDING),
+                    Set.of(PacketType.SCREEN_INFO, PacketType.SESSION_ACTIVE, PacketType.PING, PacketType.PONG,
+                            PacketType.DISCONNECT)),
+            entry(new Key(Shell.CONNECTOR, Lane.COMMAND, Stage.ACTIVE),
+                    Set.of(PacketType.PING, PacketType.PONG, PacketType.DISCONNECT)),
             entry(new Key(Shell.CONNECTOR, Lane.IMAGE, Stage.HANDSHAKE), Set.of()),
             entry(new Key(Shell.CONNECTOR, Lane.IMAGE, Stage.PENDING), Set.of()),
-            entry(new Key(Shell.CONNECTOR, Lane.IMAGE, Stage.ACTIVE), Set.of()));
+            entry(new Key(Shell.CONNECTOR, Lane.IMAGE, Stage.ACTIVE), Set.of(PacketType.FRAME)));
 
     private static final Map<Shell, Map<Lane, Set<PacketType>>> READABLE = readerUnions();
 
@@ -47,7 +45,7 @@ public final class PacketRules {
         return TABLE.get(new Key(shell, lane, stage));
     }
 
-    /** Immutable union of pending and active types, preserving the reader's v1 error layer. */
+    /** Immutable union of pending and active types; the session still checks the current stage. */
     public static Set<PacketType> readableAfterHandshake(Shell shell, Lane lane) {
         return READABLE.get(shell).get(lane);
     }

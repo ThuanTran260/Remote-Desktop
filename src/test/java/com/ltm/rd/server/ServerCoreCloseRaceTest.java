@@ -21,6 +21,10 @@ import org.junit.jupiter.api.Timeout;
  */
 @Timeout(60)
 class ServerCoreCloseRaceTest {
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
+
+    @org.junit.jupiter.api.AfterEach void closeHostResources() { hostResources.close(); }
+
     private static final InetAddress LO = InetAddress.getLoopbackAddress();
     private static final long WAIT_S = 10;
 
@@ -53,7 +57,7 @@ class ServerCoreCloseRaceTest {
      * @param closeOnOtherThread false: close() runs inside the window on start()'s own thread; true: it runs
      *                           on another thread while start() waits in the window for it to finish
      */
-    private static void startOvertakenByClose(boolean closeOnOtherThread) throws Exception {
+    private void startOvertakenByClose(boolean closeOnOtherThread) throws Exception {
         Set<Thread> before = liveRdThreads();
         int cmd = freePort();
         int img = freePort();
@@ -69,7 +73,7 @@ class ServerCoreCloseRaceTest {
                 }
                 : () -> holder[0].close();
         ServerCore.Seams seams = new ServerCore.Seams(null, null, null, false, null, window);
-        ServerCore core = new ServerCore(new ServerConfig(LO, cmd, img, Timeouts.DEFAULTS, System::nanoTime,
+        ServerCore core = hostResources.core(new ServerConfig(LO, cmd, img, Timeouts.DEFAULTS, System::nanoTime,
                 new SecureRandom()), seams);
         holder[0] = core;
         Thread closer = new Thread(() -> {

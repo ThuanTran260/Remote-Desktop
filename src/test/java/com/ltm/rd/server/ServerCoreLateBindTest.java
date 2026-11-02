@@ -11,6 +11,10 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(60)
 class ServerCoreLateBindTest {
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
+
+    @org.junit.jupiter.api.AfterEach void closeHostResources() { hostResources.close(); }
+
     private static final InetAddress LO = InetAddress.getLoopbackAddress();
 
     private static int freePort() throws Exception {
@@ -26,7 +30,7 @@ class ServerCoreLateBindTest {
         ServerCore[] holder = new ServerCore[1];
         // close() runs after both sockets are bound but before start() published them
         ServerCore.Seams seams = new ServerCore.Seams(null, null, null, false, () -> holder[0].close());
-        ServerCore core = new ServerCore(new ServerConfig(LO, cmd, img, Timeouts.DEFAULTS, System::nanoTime,
+        ServerCore core = hostResources.core(new ServerConfig(LO, cmd, img, Timeouts.DEFAULTS, System::nanoTime,
                 new SecureRandom()), seams);
         holder[0] = core;
 

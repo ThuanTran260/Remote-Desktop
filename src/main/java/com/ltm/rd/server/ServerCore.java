@@ -5,11 +5,15 @@ import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.SessionLifecycle;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
+import com.ltm.rd.host.AdapterFactory;
+import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.host.ScreenGeometry;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -23,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.UnaryOperator;
 
@@ -73,6 +78,11 @@ public final class ServerCore implements AutoCloseable {
     private final LongSupplier clock;
     private final ServerConfig config;
     private final Seams seams;
+    private final InputExecutor input;
+    private final AdapterFactory adapters;
+    private final Consumer<ScreenGeometry> publishBounds;
+    private final Runnable beforeSenderStart;
+    private final Consumer<ServerSession> sessionObserver;
     private final PendingConnections pending;
     private final SessionManager sessions;
     private final HandshakeHandler handler;
@@ -89,19 +99,28 @@ public final class ServerCore implements AutoCloseable {
     private volatile Thread acceptCmd;
     private volatile Thread acceptImg;
 
-    public ServerCore(ServerConfig config) {
-        this(config, Seams.none());
+    public ServerCore(ServerConfig config, InputExecutor input, AdapterFactory adapters,
+            Consumer<ScreenGeometry> publishBounds, Runnable beforeSenderStart, Consumer<ServerSession> sessionObserver) {
+        this(config, input, adapters, publishBounds, beforeSenderStart, sessionObserver, Seams.none());
     }
 
-    ServerCore(ServerConfig config, Seams seams) {
+    ServerCore(ServerConfig config, InputExecutor input, AdapterFactory adapters,
+            Consumer<ScreenGeometry> publishBounds, Runnable beforeSenderStart,
+            Consumer<ServerSession> sessionObserver, Seams seams) {
         this.config = Objects.requireNonNull(config);
         this.seams = Objects.requireNonNull(seams);
+        this.input = Objects.requireNonNull(input);
+        this.adapters = Objects.requireNonNull(adapters);
+        this.publishBounds = Objects.requireNonNull(publishBounds);
+        this.beforeSenderStart = Objects.requireNonNull(beforeSenderStart);
+        this.sessionObserver = Objects.requireNonNull(sessionObserver);
         this.timeouts = config.timeouts();
         this.clock = config.nanoClock();
         this.pending = new PendingConnections(timeouts.handshake());
         this.sessions = new SessionManager(config.random(),
                 new AuthGuard(1024, 3, timeouts.ipLock()), timeouts, clock, this::createSession);
-        this.handler = new HandshakeHandler(sessions, pending, timeouts, clock, this::onReserved, seams.beforeAttachImage());
+        this.handler = new HandshakeHandler(sessions, pending, timeouts, clock, this::onReserved,
+                seams.beforeAttachImage(), config.imageOutputDecorator());
     }
 
     public SessionManager sessions() {
@@ -234,14 +253,20 @@ public final class ServerCore implements AutoCloseable {
             PendingConnection pc = new PendingConnection(socket, clock.getAsLong());
             pending.add(pc);
             try {
-                socket.setTcpNoDelay(true);
-                socket.setSoTimeout((int) timeouts.handshake().toMillis()); // fallback if the sweep is late
+                configureAcceptedSocket(socket, kind, (int) timeouts.handshake().toMillis());
                 pool.execute(new HandshakeTask(kind, pc)); // a full pool closes the socket in the handler
             } catch (Throwable e) {
                 pc.closeIfPending();
                 pending.remove(pc);
             }
         }
+    }
+
+    static void configureAcceptedSocket(Socket socket, HandshakeHandler.Kind kind, int handshakeTimeoutMillis)
+            throws SocketException {
+        socket.setTcpNoDelay(true);
+        if (kind == HandshakeHandler.Kind.IMAGE) socket.setSendBufferSize(64 * 1024);
+        socket.setSoTimeout(handshakeTimeoutMillis); // fallback if the sweep is late
     }
 
     /** Builds a session that is not running yet; called under the manager lock. */
@@ -252,7 +277,7 @@ public final class ServerCore implements AutoCloseable {
                 : new SessionLifecycle<>(ServerPhase.RESERVED, ServerPhase.CLOSING, clock, timeouts.closeGrace(),
                         scheduler, cleanup, seams.lifecycleThreads());
         ServerSession.Env env = new ServerSession.Env(timeouts, clock, ticker, sessions::shuttingDown,
-                seams.afterTokenCheck(), true, seams.inputReleaseSeam());
+                seams.afterTokenCheck(), seams.inputReleaseSeam(), input, adapters, publishBounds, beforeSenderStart);
         return new ServerSession(generation, token, peer, reservedAtNanos, lifecycle, env);
     }
 
@@ -263,6 +288,7 @@ public final class ServerCore implements AutoCloseable {
                 .thenRun(() -> sessions.onSessionReleased(session)); // failed release keeps the slot BUSY
         Ticker.Registration registration = ticker.register(session);
         session.lifecycle().addStopHook(registration::close);
+        sessionObserver.accept(session);
     }
 
     /**
@@ -271,8 +297,12 @@ public final class ServerCore implements AutoCloseable {
      */
     @Override
     public void close() {
-        if (!closed.compareAndSet(false, true)) return;
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLOSE_WAIT_MS);
+        closeUntil(deadline);
+    }
+
+    public void closeUntil(long deadlineNanos) {
+        if (!closed.compareAndSet(false, true)) return;
         sessions.setShuttingDown();
         closeQuietly(cmdSocket);
         closeQuietly(imgSocket);
@@ -281,7 +311,7 @@ public final class ServerCore implements AutoCloseable {
         if (session != null) {
             session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.SHUTDOWN, "server shutting down", true));
         }
-        releaseResources(session, deadline);
+        releaseResources(session, deadlineNanos);
     }
 
     /**

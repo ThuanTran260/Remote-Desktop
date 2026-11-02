@@ -6,9 +6,6 @@ import com.ltm.rd.client.ClientConfig;
 import com.ltm.rd.client.ClientHooks;
 import com.ltm.rd.client.ClientPhase;
 import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.host.FakeInputDevice;
-import com.ltm.rd.host.FakeScreenSource;
-import com.ltm.rd.host.InputExecutor;
 import com.ltm.rd.client.SocketConnector;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.FakeClock;
@@ -16,6 +13,9 @@ import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
+import com.ltm.rd.host.InputExecutor;
 import com.ltm.rd.it.RecordingRelay.Dir;
 import com.ltm.rd.server.ServerConfig;
 import com.ltm.rd.server.ServerCore;
@@ -64,26 +64,26 @@ class GoldenWireTraceTest {
 
     /** Handshake up to ACTIVE, command channel. */
     private static final List<String> SUCCESS_CMD = List.of(
-            "C>S AUTH(v1) @AUTHENTICATING",
+            "C>S AUTH(v2) @AUTHENTICATING",
             "S>C AUTH_RESULT(OK) @RESERVED",
-            "C>S SCREEN_INFO(1920x1080) @ATTACHING",
+            "S>C SCREEN_INFO(1920x1080) @RESERVED",
             "S>C SESSION_ACTIVE @ACTIVE");
 
     /** Handshake up to ACTIVE, image channel: ATTACH, then frames. */
     private static final List<String> SUCCESS_IMG = List.of(
-            "C>S ATTACH(v1) @ATTACHING",
-            "C>S FRAME @ACTIVE");
+            "C>S ATTACH(v2) @ATTACHING",
+            "S>C FRAME @ACTIVE");
 
     private static final List<String> WRONG_CODE_CMD = List.of(
-            "C>S AUTH(v1) @AUTHENTICATING",
+            "C>S AUTH(v2) @AUTHENTICATING",
             "S>C AUTH_RESULT(WRONG_CODE) @-");
 
     private static final List<String> LOCKED_CMD = List.of(
-            "C>S AUTH(v1) @AUTHENTICATING",
+            "C>S AUTH(v2) @AUTHENTICATING",
             "S>C AUTH_RESULT(LOCKED) @-");
 
     private static final List<String> BUSY_CMD = List.of(
-            "C>S AUTH(v1) @AUTHENTICATING",
+            "C>S AUTH(v2) @AUTHENTICATING",
             "S>C AUTH_RESULT(BUSY) @-");
 
     private static final List<String> NO_PACKETS = List.of();
@@ -112,6 +112,9 @@ class GoldenWireTraceTest {
     private final List<ServerCore> cores = new ArrayList<>();
     private final List<Ticker> extraTickers = new ArrayList<>();
 
+
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources(executor);
+
     @AfterEach
     void cleanup() throws Exception {
         for (ClientSession c : clients) c.cancel();
@@ -122,6 +125,7 @@ class GoldenWireTraceTest {
         for (Ticker t : extraTickers) t.close();
         scheduler.shutdownNow();
         cleanup.shutdownNow();
+        hostResources.close();
     }
 
     /**
@@ -140,7 +144,7 @@ class GoldenWireTraceTest {
     }
 
     private ServerCore core(Timeouts t, LongSupplier clock) throws IOException {
-        ServerCore c = new ServerCore(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, t, clock,
+        ServerCore c = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, t, clock,
                 new SecureRandom()));
         cores.add(c);
         c.start();
@@ -155,9 +159,7 @@ class GoldenWireTraceTest {
 
     private ClientSession client(RecordingRelay relay, String code, Timeouts t, LongSupplier clock, Ticker ticker) {
         ClientConfig cfg = new ClientConfig("127.0.0.1", relay.cmdPort(), relay.imgPort(), code, t, clock);
-        ClientSession c = new ClientSession(cfg, generations.incrementAndGet(), executor,
-                new FakeScreenSource(1920, 1080), SocketConnector.DEFAULT, ClientHooks.none(), ticker, scheduler,
-                cleanup);
+        ClientSession c = new ClientSession(cfg, generations.incrementAndGet(), SocketConnector.DEFAULT, ClientHooks.none(), ticker, scheduler, cleanup);
         relay.bind(c);
         clients.add(c);
         return c;
@@ -198,8 +200,10 @@ class GoldenWireTraceTest {
     private ClientSession activeClient(ServerCore core, RecordingRelay relay) throws Exception {
         ClientSession c = client(relay, core.sessions().currentCode());
         assertTrue(c.start());
+        awaitSeen(relay.cmd(), Dir.S2C, PacketType.SCREEN_INFO);
+        relay.openImageGate();
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        awaitSeen(relay.img(), Dir.C2S, PacketType.FRAME);
+        awaitSeen(relay.img(), Dir.S2C, PacketType.FRAME);
         return c;
     }
 
@@ -208,7 +212,7 @@ class GoldenWireTraceTest {
     @Test
     void successFlowTrace() throws Exception {
         ServerCore core = core(frozen(), serverClock);
-        RecordingRelay relay = relay(core, false, false);
+        RecordingRelay relay = relay(core, true, false);
         ClientSession c = activeClient(core, relay);
         relay.freeze();
 
@@ -217,7 +221,7 @@ class GoldenWireTraceTest {
         assertEquals(ClientPhase.ACTIVE, c.phase());
         assertEquals(ServerPhase.ACTIVE, serverSession(core).phase());
         assertEquals(new Packet.SizePayload(1920, 1080), serverSession(core).screen().orElseThrow());
-        assertEquals(1, c.inputBeginCount());
+        assertEquals(1, core.sessions().current().orElseThrow().inputBeginCount());
     }
 
     // ---- failure flows -------------------------------------------------------------------------
@@ -226,7 +230,7 @@ class GoldenWireTraceTest {
     void wrongCodeTrace() throws Exception {
         ServerCore core = core(frozen(), serverClock);
         String codeBefore = core.sessions().currentCode();
-        RecordingRelay relay = relay(core, false, false);
+        RecordingRelay relay = relay(core, true, false);
         ClientSession c = client(relay, wrongCode(core));
         c.start();
         awaitTerminated(c);
@@ -247,7 +251,7 @@ class GoldenWireTraceTest {
         ServerCore core = core(frozen(), serverClock);
         String codeBefore = core.sessions().currentCode();
         for (int attempt = 1; attempt <= 3; attempt++) {
-            RecordingRelay relay = relay(core, false, false);
+            RecordingRelay relay = relay(core, true, false);
             ClientSession c = client(relay, wrongCode(core));
             c.start();
             awaitTerminated(c);
@@ -256,7 +260,7 @@ class GoldenWireTraceTest {
             assertEquals(Packet.AuthStatus.WRONG_CODE, c.authFailure().orElseThrow());
         }
 
-        RecordingRelay relay = relay(core, false, false);
+        RecordingRelay relay = relay(core, true, false);
         ClientSession locked = client(relay, codeBefore); // even the right code is refused now
         locked.start();
         awaitTerminated(locked);
@@ -273,12 +277,12 @@ class GoldenWireTraceTest {
     @Test
     void busyTrace() throws Exception {
         ServerCore core = core(frozen(), serverClock);
-        RecordingRelay first = relay(core, false, false);
+        RecordingRelay first = relay(core, true, false);
         ClientSession active = activeClient(core, first);
         ServerSession session = serverSession(core);
         String codeInUse = core.sessions().currentCode();
 
-        RecordingRelay second = relay(core, false, false);
+        RecordingRelay second = relay(core, true, false);
         ClientSession busy = client(second, codeInUse);
         busy.start();
         awaitTerminated(busy);
@@ -307,10 +311,10 @@ class GoldenWireTraceTest {
         relay.freeze();
 
         assertEquals(List.of(
-                "C>S AUTH(v1) @AUTHENTICATING",
+                "C>S AUTH(v2) @AUTHENTICATING",
                 "S>C AUTH_RESULT(OK) @RESERVED",
-                "C>S SCREEN_INFO(1920x1080) @ATTACHING"), relay.cmd().lines());
-        assertEquals(List.of("C>S ATTACH(v1) @ATTACHING"), relay.img().lines());
+                "S>C SCREEN_INFO(1920x1080) @RESERVED"), relay.cmd().lines());
+        assertEquals(List.of("C>S ATTACH(v2) @ATTACHING"), relay.img().lines());
         // only that one connection ended: the session still waits for a valid ATTACH
         ServerSession session = serverSession(core);
         assertFalse(ServerTestAccess.lifecycle(session).isClosed());
@@ -325,7 +329,7 @@ class GoldenWireTraceTest {
         RecordingRelay relay = relay(core, true, false); // the image connection never reaches the server
         ClientSession c = client(relay, codeBefore);
         c.start();
-        awaitSeen(relay.cmd(), Dir.C2S, PacketType.SCREEN_INFO);
+        awaitSeen(relay.cmd(), Dir.S2C, PacketType.SCREEN_INFO);
         ServerSession session = serverSession(core);
         assertEquals(ServerPhase.RESERVED, session.phase());
 
@@ -334,9 +338,9 @@ class GoldenWireTraceTest {
         relay.freeze();
 
         assertEquals(List.of(
-                "C>S AUTH(v1) @AUTHENTICATING",
+                "C>S AUTH(v2) @AUTHENTICATING",
                 "S>C AUTH_RESULT(OK) @RESERVED",
-                "C>S SCREEN_INFO(1920x1080) @ATTACHING",
+                "S>C SCREEN_INFO(1920x1080) @RESERVED",
                 "S>C DISCONNECT(TIMEOUT, \"attach timeout\") @CLOSING"), relay.cmd().lines());
         assertEquals(NO_PACKETS, relay.img().lines());
         CloseInfo serverInfo = session.terminated().get(WAIT_S, TimeUnit.SECONDS);
@@ -346,7 +350,7 @@ class GoldenWireTraceTest {
         CloseInfo clientInfo = c.lifecycle().closeInfo().orElseThrow();
         assertEquals(Packet.DisconnectReason.TIMEOUT, clientInfo.reason());
         assertEquals("peer disconnected", clientInfo.message());
-        assertEquals(0, c.inputBeginCount());
+        assertEquals(0, session.inputBeginCount());
         awaitTrue(() -> core.sessions().current().isEmpty(), "the slot is free again");
         assertNotEquals(codeBefore, core.sessions().currentCode(), "the code changed with the slot");
     }
@@ -355,7 +359,7 @@ class GoldenWireTraceTest {
     void clientDisconnectDuringActiveTrace() throws Exception {
         ServerCore core = core(frozen(), serverClock);
         String codeBefore = core.sessions().currentCode();
-        RecordingRelay relay = relay(core, false, false);
+        RecordingRelay relay = relay(core, true, false);
         ClientSession c = activeClient(core, relay);
         ServerSession session = serverSession(core);
 
@@ -383,7 +387,7 @@ class GoldenWireTraceTest {
     void serverDisconnectDuringActiveTrace() throws Exception {
         ServerCore core = core(frozen(), serverClock);
         String codeBefore = core.sessions().currentCode();
-        RecordingRelay relay = relay(core, false, false);
+        RecordingRelay relay = relay(core, true, false);
         ClientSession c = activeClient(core, relay);
         ServerSession session = serverSession(core);
 
@@ -416,7 +420,19 @@ class GoldenWireTraceTest {
      * before AUTH_RESULT, and without it the trace is the success trace.
      */
     @Test
-    void attachSlowerThanPingIntervalOnlyAddsHeartbeats() throws Exception {
+    void prepareSlowerThanPingIntervalOnlyAddsHeartbeats() throws Exception {
+        java.util.concurrent.CountDownLatch preparing = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        hostResources.factory = new com.ltm.rd.host.AdapterFactory() {
+            @Override public com.ltm.rd.host.InputDevice inputDevice() { throw new AssertionError(); }
+            @Override public void refreshInputDevice() {
+                preparing.countDown();
+                try { release.await(); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
+            }
+            @Override public com.ltm.rd.host.ScreenSource newScreenSource() { return new FakeScreenSource(1920, 1080); }
+        };
+        try {
         Timeouts slowAttach = timeouts(Duration.ofMillis(100), Duration.ofSeconds(30));
         ServerCore core = core(slowAttach, System::nanoTime);
         RecordingRelay relay = relay(core, true, false);
@@ -427,9 +443,13 @@ class GoldenWireTraceTest {
 
         awaitSeen(relay.cmd(), Dir.S2C, PacketType.PING); // the server pinged while still waiting for ATTACH
         assertEquals(ClientPhase.ATTACHING, c.phase(), "no ATTACH yet: the image connection is held");
+        assertTrue(preparing.await(WAIT_S, TimeUnit.SECONDS));
+        assertEquals(-1, relay.cmd().indexOf(Dir.S2C, PacketType.SCREEN_INFO));
+        release.countDown();
+        awaitSeen(relay.cmd(), Dir.S2C, PacketType.SCREEN_INFO);
         relay.openImageGate();
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        awaitSeen(relay.img(), Dir.C2S, PacketType.FRAME);
+        awaitSeen(relay.img(), Dir.S2C, PacketType.FRAME);
         relay.freeze();
 
         RecordingRelay.Trace cmd = relay.cmd();
@@ -442,5 +462,6 @@ class GoldenWireTraceTest {
         assertEquals(SUCCESS_CMD, cmd.linesWithoutHeartbeat());
         assertEquals(SUCCESS_IMG, relay.img().linesWithoutHeartbeat());
         assertEquals(ClientPhase.ACTIVE, c.phase());
+        } finally { release.countDown(); hostResources.factory = null; }
     }
 }

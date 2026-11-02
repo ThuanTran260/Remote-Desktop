@@ -45,7 +45,15 @@ final class FakeAdapterFactory implements AdapterFactory {
     private final List<FakeScreenSource> screens = new CopyOnWriteArrayList<>();
     private volatile AdapterException inputDeviceFailure;
     private volatile AdapterException newScreenFailure;
+    private volatile Exception preparationFailure;
+    private volatile boolean failRefresh;
     private volatile Gate newScreenGate;
+    private volatile int nextWidth = 1920;
+    private volatile int nextHeight = 1080;
+    final List<String> preparationCalls = new CopyOnWriteArrayList<>();
+    java.util.function.Supplier<String> inputState = () -> "unobserved";
+
+    void nextGeometry(int width, int height) { nextWidth = width; nextHeight = height; }
 
     void failInputDevice(AdapterException e) {
         inputDeviceFailure = e;
@@ -53,6 +61,18 @@ final class FakeAdapterFactory implements AdapterFactory {
 
     void failNewScreenSource(AdapterException e) {
         newScreenFailure = e;
+    }
+
+    void failPreparation(boolean refresh, Exception failure) {
+        failRefresh = refresh;
+        preparationFailure = failure;
+    }
+
+    private void throwPreparationFailure(boolean refresh) throws AdapterException {
+        Exception failure = preparationFailure;
+        if (failRefresh != refresh || failure == null) return;
+        if (failure instanceof AdapterException checked) throw checked;
+        throw (RuntimeException) failure;
     }
 
     Gate blockNewScreenSource() {
@@ -84,6 +104,7 @@ final class FakeAdapterFactory implements AdapterFactory {
     @Override
     public ScreenSource newScreenSource() throws AdapterException {
         newScreenCalls.incrementAndGet();
+        preparationCalls.add("screen:" + Thread.currentThread().getName() + ":" + inputState.get());
         Gate gate = newScreenGate;
         if (gate != null) {
             newScreenGate = null;
@@ -104,7 +125,8 @@ final class FakeAdapterFactory implements AdapterFactory {
         }
         AdapterException failure = newScreenFailure;
         if (failure != null) throw failure;
-        FakeScreenSource source = new FakeScreenSource(1920, 1080);
+        throwPreparationFailure(false);
+        FakeScreenSource source = new FakeScreenSource(nextWidth, nextHeight);
         screens.add(source);
         return source;
     }
@@ -118,7 +140,9 @@ final class FakeAdapterFactory implements AdapterFactory {
     }
 
     @Override
-    public void refreshInputDevice() {
+    public void refreshInputDevice() throws AdapterException {
         refreshCalls.incrementAndGet();
+        preparationCalls.add("refresh:" + Thread.currentThread().getName() + ":" + inputState.get());
+        throwPreparationFailure(true);
     }
 }

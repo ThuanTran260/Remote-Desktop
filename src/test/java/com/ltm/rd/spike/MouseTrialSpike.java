@@ -31,15 +31,14 @@ import javax.swing.SwingUtilities;
  *
  * <pre>
  * ./mvnw.cmd -q test-compile
- * java -cp "target/classes;target/test-classes" com.ltm.rd.spike.MouseTrialSpike server
- * java -cp "target/classes;target/test-classes" com.ltm.rd.spike.MouseTrialSpike client SERVER_IP CODE
+ * java -cp "target/classes;target/test-classes" com.ltm.rd.spike.MouseTrialSpike host
+ * java -cp "target/classes;target/test-classes" com.ltm.rd.spike.MouseTrialSpike viewer HOST_IP CODE
  * java -cp "target/classes;target/test-classes" com.ltm.rd.spike.MouseTrialSpike loopback
  * </pre>
  *
  * <ul>
- *   <li>{@code server}: the controlling machine; shows the control window with the code and the
- *       remote screen.</li>
- *   <li>{@code client SERVER_IP CODE}: the controlled machine; shares its screen through Robot.</li>
+ *   <li>{@code host}: the controlled machine; displays its code and shares its screen through Robot.</li>
+ *   <li>{@code viewer HOST_IP CODE}: the controlling machine; shows the remote screen.</li>
  *   <li>{@code loopback}: both roles in one JVM, for a first look without a second machine.</li>
  * </ul>
  *
@@ -59,51 +58,52 @@ public final class MouseTrialSpike {
         }
         String mode = args.length > 0 ? args[0] : "loopback";
         switch (mode) {
-            case "server" -> {
+            case "host" -> {
                 AppRuntime server = startServer();
-                SwingUtilities.invokeLater(() -> openControlWindow(server, null));
+                SwingUtilities.invokeLater(() -> openClientWindow(server));
             }
-            case "client" -> {
+            case "viewer" -> {
                 if (args.length < 3) {
-                    System.err.println("usage: client SERVER_IP CODE");
+                    System.err.println("usage: viewer HOST_IP CODE");
                     System.exit(2);
                 }
                 AppRuntime client = startClient(args[1], args[2]);
-                SwingUtilities.invokeLater(() -> openClientWindow(client));
+                SwingUtilities.invokeLater(() -> openControlWindow(client, null));
             }
             case "loopback" -> {
                 AppRuntime server = startServer();
                 Snapshot listening = server.snapshot();
                 AppRuntime client = startClient("127.0.0.1", listening.code(), listening.cmdPort(),
                         listening.imgPort());
-                SwingUtilities.invokeLater(() -> openControlWindow(server, client));
+                SwingUtilities.invokeLater(() -> openControlWindow(client, server));
             }
             default -> {
-                System.err.println("unknown mode, use server, client or loopback");
+                System.err.println("unknown mode, use host, viewer or loopback");
                 System.exit(2);
             }
         }
     }
 
     private static AppRuntime startServer() throws Exception {
-        AppRuntime server = AppRuntime.forServer(AppConfig.from(LaunchOptions.parse(new String[] {"--server"})));
-        server.startServer().get(10, TimeUnit.SECONDS);
+        AppRuntime server = AppRuntime.forHost(AppConfig.from(LaunchOptions.parse(new String[] {"--role", "host"})),
+                new RobotAdapterFactory());
+        server.startHost().get(10, TimeUnit.SECONDS);
         return server;
     }
 
     private static AppRuntime startClient(String host, String code) throws Exception {
-        AppConfig cfg = AppConfig.from(LaunchOptions.parse(new String[] {"--client"}));
+        AppConfig cfg = AppConfig.from(LaunchOptions.parse(new String[] {"--role", "viewer"}));
         return startClient(host, code, cfg);
     }
 
     private static AppRuntime startClient(String host, String code, int cmdPort, int imgPort) throws Exception {
-        AppConfig base = AppConfig.from(LaunchOptions.parse(new String[] {"--client"}));
+        AppConfig base = AppConfig.from(LaunchOptions.parse(new String[] {"--role", "viewer"}));
         return startClient(host, code, new AppConfig(base.bindAddress(), cmdPort, imgPort, host, base.timeouts(),
                 base.nanoClock(), base.shutdownBudget()));
     }
 
     private static AppRuntime startClient(String host, String code, AppConfig cfg) throws Exception {
-        AppRuntime client = AppRuntime.forClient(cfg, new RobotAdapterFactory());
+        AppRuntime client = AppRuntime.forViewer(cfg);
         ConnectOutcome outcome = client.connect(host, code);
         if (outcome != ConnectOutcome.STARTED) {
             System.err.println("connect refused: " + outcome);
@@ -180,7 +180,7 @@ public final class MouseTrialSpike {
 
         SnapshotPump pump = new SnapshotPump(client, Duration.ofMillis(POLL_MS));
         SnapshotTimer timer = new SnapshotTimer(new SnapshotApplier(pump,
-                s -> status.setText(s.phase() + "  " + s.message())), POLL_MS);
+                s -> status.setText(s.phase() + (s.code() == null ? "" : "  code " + s.code()) + "  " + s.message())), POLL_MS);
         timer.start();
         disconnect.addActionListener(e -> client.disconnect());
         frame.addWindowListener(new WindowAdapter() {

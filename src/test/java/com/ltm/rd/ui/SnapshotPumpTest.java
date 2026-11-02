@@ -19,8 +19,8 @@ import org.junit.jupiter.api.Timeout;
 class SnapshotPumpTest {
 
     static Snapshot snapshotWithFrames(long frames) {
-        return new Snapshot(LaunchOptions.Role.SERVER, UiPhase.ACTIVE, 1, 0, "", null, 0, 0, null, 0, 0, null, frames,
-                false, TrafficStats.ZERO);
+        return new Snapshot(LaunchOptions.Role.VIEWER, UiPhase.ACTIVE, 1, 0, "", null, 0, 0, null, 0, 0, null, frames,
+                false, TrafficStats.ZERO, Snapshot.Cleanup.NONE);
     }
 
     /** A controller whose snapshot() numbers its answers 1, 2, 3 ... and can run a hook per call. */
@@ -41,7 +41,7 @@ class SnapshotPumpTest {
         }
 
         @Override
-        public CompletableFuture<Void> startServer() {
+        public CompletableFuture<Void> startHost() {
             throw new UnsupportedOperationException();
         }
 

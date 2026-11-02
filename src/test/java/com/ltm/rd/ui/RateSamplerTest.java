@@ -13,8 +13,8 @@ class RateSamplerTest {
 
     private static Snapshot snap(long generation, long frames, long cmdIn, long cmdOut, long imgIn, long imgOut,
             long rtt) {
-        return new Snapshot(LaunchOptions.Role.SERVER, UiPhase.ACTIVE, generation, 0, "", null, 0, 0, null, 0, 0, null,
-                frames, false, new TrafficStats(cmdIn, cmdOut, imgIn, imgOut, rtt));
+        return new Snapshot(LaunchOptions.Role.VIEWER, UiPhase.ACTIVE, generation, 0, "", null, 0, 0, null, 0, 0, null,
+                frames, false, new TrafficStats(cmdIn, cmdOut, imgIn, imgOut, rtt), Snapshot.Cleanup.NONE);
     }
 
     @Test

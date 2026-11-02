@@ -109,7 +109,7 @@ class PacketIOTest {
 
     @Test
     void goldenAuth() throws IOException {
-        byte[] expected = bytes(0x01, 0, 0, 0, 0x0B, 0x4C, 0x54, 0x4D, 0x52, 0x01,
+        byte[] expected = bytes(0x01, 0, 0, 0, 0x0B, 0x4C, 0x54, 0x4D, 0x52, 0x02,
                 0x31, 0x32, 0x33, 0x34, 0x35, 0x36);
         assertArrayEquals(expected, serialize(Packet.auth("123456")));
     }
@@ -118,7 +118,7 @@ class PacketIOTest {
     void goldenAttach() throws IOException {
         byte[] tok = new byte[16];
         for (int i = 0; i < 16; i++) tok[i] = (byte) i;
-        byte[] expected = bytes(0x04, 0, 0, 0, 0x15, 0x4C, 0x54, 0x4D, 0x52, 0x01,
+        byte[] expected = bytes(0x04, 0, 0, 0, 0x15, 0x4C, 0x54, 0x4D, 0x52, 0x02,
                 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
         assertArrayEquals(expected, serialize(Packet.attach(tok)));
     }

@@ -35,10 +35,14 @@ class SessionManagerTest {
         return t;
     });
 
+
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
+
     @AfterEach
     void shutdown() {
         scheduler.shutdownNow();
         cleanup.shutdownNow();
+        hostResources.close();
     }
 
     private static InetAddress ip(int n) throws Exception {
@@ -47,7 +51,7 @@ class SessionManagerTest {
 
     private ServerSession newSession(long generation, byte[] token, InetAddress peer, long reservedAt) {
         return new ServerSession(generation, token, peer, reservedAt, new SessionLifecycle<>(ServerPhase.RESERVED,
-                ServerPhase.CLOSING, System::nanoTime, Duration.ofMillis(100), scheduler, cleanup));
+                ServerPhase.CLOSING, System::nanoTime, Duration.ofMillis(100), scheduler, cleanup), hostResources.env(com.ltm.rd.common.Timeouts.DEFAULTS, System::nanoTime, null, () -> false, null, null));
     }
 
     private SessionManager manager(SecureRandom random, SessionManager.SessionFactory factory) {
@@ -71,7 +75,7 @@ class SessionManagerTest {
     @Test
     void correctCodeReservesAndSecondGetsBusy() throws Exception {
         SessionManager m = manager();
-        ReserveResult first = m.tryReserve(ip(1), 1, m.currentCode());
+        ReserveResult first = m.tryReserve(ip(1), 2, m.currentCode());
         assertEquals(AuthStatus.OK, first.status());
         ServerSession session = first.session();
         assertNotNull(session);
@@ -84,7 +88,7 @@ class SessionManagerTest {
         copy[0] ^= 0x55;
         assertFalse(Arrays.equals(copy, session.token()), "token() returns a defensive copy");
 
-        ReserveResult second = m.tryReserve(ip(2), 1, m.currentCode());
+        ReserveResult second = m.tryReserve(ip(2), 2, m.currentCode());
         assertEquals(AuthStatus.BUSY, second.status());
         assertNull(second.session());
     }
@@ -93,18 +97,18 @@ class SessionManagerTest {
     void busyReportedBeforeLocked() throws Exception {
         SessionManager m = manager();
         for (int i = 0; i < 3; i++) {
-            assertEquals(AuthStatus.WRONG_CODE, m.tryReserve(ip(2), 1, wrong(m.currentCode())).status());
+            assertEquals(AuthStatus.WRONG_CODE, m.tryReserve(ip(2), 2, wrong(m.currentCode())).status());
         }
-        assertEquals(AuthStatus.LOCKED, m.tryReserve(ip(2), 1, m.currentCode()).status());
-        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 1, m.currentCode()).status());
-        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(2), 1, m.currentCode()).status(), "BUSY wins over LOCKED");
+        assertEquals(AuthStatus.LOCKED, m.tryReserve(ip(2), 2, m.currentCode()).status());
+        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 2, m.currentCode()).status());
+        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(2), 2, m.currentCode()).status(), "BUSY wins over LOCKED");
     }
 
     @Test
     void wrongCodeDoesNotChangeCode() throws Exception {
         SessionManager m = manager();
         String code = m.currentCode();
-        assertEquals(AuthStatus.WRONG_CODE, m.tryReserve(ip(1), 1, wrong(code)).status());
+        assertEquals(AuthStatus.WRONG_CODE, m.tryReserve(ip(1), 2, wrong(code)).status());
         assertEquals(code, m.currentCode());
         assertTrue(m.current().isEmpty());
     }
@@ -114,12 +118,12 @@ class SessionManagerTest {
         SessionManager m = manager();
         for (long t : new long[] {0, 10, 20}) {
             clock.set(s(t));
-            assertEquals(AuthStatus.WRONG_CODE, m.tryReserve(ip(1), 1, wrong(m.currentCode())).status());
+            assertEquals(AuthStatus.WRONG_CODE, m.tryReserve(ip(1), 2, wrong(m.currentCode())).status());
         }
         clock.set(s(21));
-        assertEquals(AuthStatus.LOCKED, m.tryReserve(ip(1), 1, m.currentCode()).status());
+        assertEquals(AuthStatus.LOCKED, m.tryReserve(ip(1), 2, m.currentCode()).status());
         clock.set(s(50));
-        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 1, m.currentCode()).status());
+        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 2, m.currentCode()).status());
     }
 
     @Test
@@ -127,26 +131,26 @@ class SessionManagerTest {
         SessionManager m = manager();
         for (long t : new long[] {0, 10, 41}) {
             clock.set(s(t));
-            assertEquals(AuthStatus.WRONG_CODE, m.tryReserve(ip(1), 1, wrong(m.currentCode())).status());
+            assertEquals(AuthStatus.WRONG_CODE, m.tryReserve(ip(1), 2, wrong(m.currentCode())).status());
         }
         clock.set(s(42));
-        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 1, m.currentCode()).status(), "count restarted at 41 s");
+        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 2, m.currentCode()).status(), "count restarted at 41 s");
     }
 
     @Test
     void lockIsPerIp() throws Exception {
         SessionManager m = manager();
-        for (int i = 0; i < 3; i++) m.tryReserve(ip(1), 1, wrong(m.currentCode()));
-        assertEquals(AuthStatus.LOCKED, m.tryReserve(ip(1), 1, m.currentCode()).status());
-        assertEquals(AuthStatus.OK, m.tryReserve(ip(2), 1, m.currentCode()).status());
+        for (int i = 0; i < 3; i++) m.tryReserve(ip(1), 2, wrong(m.currentCode()));
+        assertEquals(AuthStatus.LOCKED, m.tryReserve(ip(1), 2, m.currentCode()).status());
+        assertEquals(AuthStatus.OK, m.tryReserve(ip(2), 2, m.currentCode()).status());
     }
 
     @Test
     void badVersionReported() throws Exception {
         SessionManager m = manager();
-        assertEquals(AuthStatus.BAD_VERSION, m.tryReserve(ip(1), 2, m.currentCode()).status());
-        for (int i = 0; i < 5; i++) m.tryReserve(ip(1), 2, wrong(m.currentCode()));
-        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 1, m.currentCode()).status(),
+        assertEquals(AuthStatus.BAD_VERSION, m.tryReserve(ip(1), 1, m.currentCode()).status());
+        for (int i = 0; i < 5; i++) m.tryReserve(ip(1), 1, wrong(m.currentCode()));
+        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 2, m.currentCode()).status(),
                 "a bad version never counts as a failed code");
         assertEquals(AuthStatus.BAD_VERSION, m.tryReserve(ip(2), 0, m.currentCode()).status(),
                 "version is checked before BUSY");
@@ -165,7 +169,7 @@ class SessionManagerTest {
                 InetAddress peer = ip(i + 1);
                 results.add(pool.submit(() -> {
                     barrier.await(WAIT_S, TimeUnit.SECONDS);
-                    return m.tryReserve(peer, 1, code).status();
+                    return m.tryReserve(peer, 2, code).status();
                 }));
             }
             int ok = 0;
@@ -185,29 +189,29 @@ class SessionManagerTest {
     @Test
     void releaseOfAStaleSessionIsIgnored() throws Exception {
         SessionManager m = manager();
-        ServerSession first = m.tryReserve(ip(1), 1, m.currentCode()).session();
+        ServerSession first = m.tryReserve(ip(1), 2, m.currentCode()).session();
         m.onSessionReleased(first);
-        ServerSession second = m.tryReserve(ip(2), 1, m.currentCode()).session();
+        ServerSession second = m.tryReserve(ip(2), 2, m.currentCode()).session();
         String secondCode = m.currentCode();
         first.disconnect();
         first.terminated().get(WAIT_S, TimeUnit.SECONDS);
         m.onSessionReleased(first);
         assertSame(second, m.current().orElseThrow());
         assertEquals(secondCode, m.currentCode());
-        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(3), 1, secondCode).status());
+        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(3), 2, secondCode).status());
     }
 
     @Test
     void staleSocketsClosedCallbackDoesNotTouchNewSession() throws Exception {
         SessionManager m = manager();
         String firstCode = m.currentCode();
-        ServerSession first = m.tryReserve(ip(1), 1, firstCode).session();
+        ServerSession first = m.tryReserve(ip(1), 2, firstCode).session();
         m.onSessionReleased(first);
         assertTrue(m.current().isEmpty());
         String secondCode = m.currentCode();
         assertNotEquals(firstCode, secondCode, "a closed session always yields a new code");
 
-        ServerSession second = m.tryReserve(ip(2), 1, secondCode).session();
+        ServerSession second = m.tryReserve(ip(2), 2, secondCode).session();
         assertEquals(2, second.generation());
         m.onSessionReleased(first); // stale callback from the old generation
         assertSame(second, m.current().orElseThrow());
@@ -217,16 +221,16 @@ class SessionManagerTest {
     @Test
     void closingSessionStillCountsAsBusyUntilSocketsClosed() throws Exception {
         SessionManager m = manager();
-        ServerSession s1 = m.tryReserve(ip(1), 1, m.currentCode()).session();
+        ServerSession s1 = m.tryReserve(ip(1), 2, m.currentCode()).session();
         s1.lifecycle().atomically(tx -> tx.advance(ServerPhase.RESERVED, ServerPhase.CLOSING));
-        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(2), 1, m.currentCode()).status());
+        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(2), 2, m.currentCode()).status());
     }
 
     @Test
     void noNewCodeWhileShuttingDown() throws Exception {
         SessionManager m = manager();
         String code = m.currentCode();
-        ServerSession s1 = m.tryReserve(ip(1), 1, code).session();
+        ServerSession s1 = m.tryReserve(ip(1), 2, code).session();
         assertFalse(m.shuttingDown());
         m.setShuttingDown();
         assertTrue(m.shuttingDown());
@@ -234,7 +238,7 @@ class SessionManagerTest {
         assertTrue(m.current().isEmpty());
         assertEquals(code, m.currentCode());
         assertFalse(m.regenerateCode());
-        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(2), 1, code).status());
+        assertEquals(AuthStatus.BUSY, m.tryReserve(ip(2), 2, code).status());
     }
 
     @Test
@@ -243,7 +247,7 @@ class SessionManagerTest {
         String before = m.currentCode();
         assertTrue(m.regenerateCode());
         assertNotEquals(before, m.currentCode());
-        m.tryReserve(ip(1), 1, m.currentCode());
+        m.tryReserve(ip(1), 2, m.currentCode());
         String during = m.currentCode();
         assertFalse(m.regenerateCode());
         assertEquals(during, m.currentCode());
@@ -268,9 +272,9 @@ class SessionManagerTest {
     @Test
     void tokensAndGenerationsDifferBetweenSessions() throws Exception {
         SessionManager m = manager();
-        ServerSession a = m.tryReserve(ip(1), 1, m.currentCode()).session();
+        ServerSession a = m.tryReserve(ip(1), 2, m.currentCode()).session();
         m.onSessionReleased(a);
-        ServerSession b = m.tryReserve(ip(1), 1, m.currentCode()).session();
+        ServerSession b = m.tryReserve(ip(1), 2, m.currentCode()).session();
         assertEquals(a.generation() + 1, b.generation());
         assertFalse(Arrays.equals(a.token(), b.token()));
     }
@@ -291,7 +295,7 @@ class SessionManagerTest {
         };
         clock.set(s(7));
         SessionManager m = manager(new SecureRandom(), spy);
-        ServerSession session = m.tryReserve(ip(1), 1, m.currentCode()).session();
+        ServerSession session = m.tryReserve(ip(1), 2, m.currentCode()).session();
         assertEquals(1, calls.get());
         assertEquals(0, ticker.registrations(), "registering the ticker is the caller's job, after tryReserve");
         ticker.close();
@@ -309,8 +313,8 @@ class SessionManagerTest {
             if (calls.getAndIncrement() == 0) throw new IllegalStateException("boom");
             return newSession(g, t, p, r);
         });
-        assertThrows(IllegalStateException.class, () -> m.tryReserve(ip(1), 1, m.currentCode()));
+        assertThrows(IllegalStateException.class, () -> m.tryReserve(ip(1), 2, m.currentCode()));
         assertTrue(m.current().isEmpty());
-        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 1, m.currentCode()).status());
+        assertEquals(AuthStatus.OK, m.tryReserve(ip(1), 2, m.currentCode()).status());
     }
 }

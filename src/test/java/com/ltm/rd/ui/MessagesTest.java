@@ -2,8 +2,8 @@ package com.ltm.rd.ui;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.host.AdapterException;
 import com.ltm.rd.common.Packet;
+import com.ltm.rd.host.AdapterException;
 import java.net.BindException;
 import java.net.ConnectException;
 import java.net.NoRouteToHostException;
@@ -12,6 +12,15 @@ import java.util.concurrent.CompletionException;
 import org.junit.jupiter.api.Test;
 
 class MessagesTest {
+
+    @Test void v2AuthAndShutdownMessagesAreNormalized() {
+        assertEquals("Host đang có phiên khác hoặc đang dọn phiên trước. Hãy thử lại sau.", Messages.forAuth(Packet.AuthStatus.BUSY));
+        assertEquals("Phiên bản khác nhau. Hãy dùng cùng một bản jar trên hai máy.", Messages.forAuth(Packet.AuthStatus.BAD_VERSION));
+        assertEquals("Không kết nối được tới Host. Kiểm tra IP, cổng và tường lửa.",
+                Messages.forThrowable(new java.net.ConnectException("secret123456")));
+        assertEquals("Chưa xác nhận dọn sạch kết nối, luồng và phím/chuột. Hãy kiểm tra máy Host trước khi tiếp tục.",
+                Messages.forShutdown(new ShutdownReport(false, true, InputRelease.NOT_NEEDED)));
+    }
 
     @Test
     void everyDisconnectReasonHasNonEmptyMessage() {
@@ -25,10 +34,10 @@ class MessagesTest {
     @Test
     void authStatusMessagesAreExact() {
         assertEquals("Mã không đúng.", Messages.forAuth(Packet.AuthStatus.WRONG_CODE));
-        assertEquals("Máy chủ đang có phiên khác.", Messages.forAuth(Packet.AuthStatus.BUSY));
+        assertEquals("Host đang có phiên khác hoặc đang dọn phiên trước. Hãy thử lại sau.", Messages.forAuth(Packet.AuthStatus.BUSY));
         assertEquals("Bị khóa tạm thời do nhập sai nhiều lần. Thử lại sau 30 giây.",
                 Messages.forAuth(Packet.AuthStatus.LOCKED));
-        assertEquals("Phiên bản không tương thích.", Messages.forAuth(Packet.AuthStatus.BAD_VERSION));
+        assertEquals("Phiên bản khác nhau. Hãy dùng cùng một bản jar trên hai máy.", Messages.forAuth(Packet.AuthStatus.BAD_VERSION));
     }
 
     @Test
@@ -40,7 +49,7 @@ class MessagesTest {
 
     @Test
     void connectionAndAdapterFailuresHaveExactMessages() {
-        String unreachable = "Không kết nối được tới máy chủ. Kiểm tra IP, cổng và tường lửa.";
+        String unreachable = "Không kết nối được tới Host. Kiểm tra IP, cổng và tường lửa.";
         assertEquals(unreachable, Messages.forThrowable(new ConnectException("refused")));
         assertEquals(unreachable, Messages.forThrowable(new NoRouteToHostException("no route")));
         assertEquals(unreachable, Messages.forThrowable(new UnknownHostException("nowhere")));

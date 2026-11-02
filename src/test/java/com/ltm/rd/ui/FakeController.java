@@ -17,6 +17,9 @@ final class FakeController implements Controller {
     private final List<Sent> sent = new ArrayList<>();
     private final List<Long> releases = new ArrayList<>();
     private volatile SendResult result = SendResult.SENT;
+    private final CompletableFuture<ShutdownReport> shutdown = new CompletableFuture<>();
+
+    CompletableFuture<ShutdownReport> shutdownFuture() { return shutdown; }
 
     FakeController() {
         this(null);
@@ -83,7 +86,7 @@ final class FakeController implements Controller {
     }
 
     @Override
-    public CompletableFuture<Void> startServer() {
+    public CompletableFuture<Void> startHost() {
         throw new UnsupportedOperationException();
     }
 
@@ -109,6 +112,6 @@ final class FakeController implements Controller {
 
     @Override
     public CompletableFuture<ShutdownReport> shutdownAsync() {
-        throw new UnsupportedOperationException();
+        return delegate == null ? shutdown : delegate.shutdownAsync();
     }
 }

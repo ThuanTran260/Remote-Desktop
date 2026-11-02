@@ -14,7 +14,7 @@ import javax.swing.JPanel;
 import javax.swing.Timer;
 
 /**
- * The window in which the Server user sees and controls the remote screen. It talks to the
+ * The window in which the Viewer user sees and controls the remote screen. It talks to the
  * application only through the {@link Controller} and the snapshots it is given. Closing it is the
  * same as Disconnect: the capture first asks for everything to be released.
  */
@@ -27,9 +27,10 @@ final class ControlFrame extends JFrame {
     private final JLabel stall = new JLabel(" ");
     private final RateSampler sampler = new RateSampler(System::nanoTime);
     private final Timer statsTimer;
+    private boolean disposed;
 
     ControlFrame(Controller controller, Supplier<Snapshot> latest) {
-        super("Điều khiển máy từ xa");
+        super("Viewer — Điều khiển Host");
         panel.setPreferredSize(new Dimension(960, 540));
         capture = new InputCapture(controller, panel, panel::hasFocus, panel::requestFocusInWindow);
         panel.addMouseListener(capture);
@@ -55,7 +56,7 @@ final class ControlFrame extends JFrame {
 
             @Override
             public void windowClosing(WindowEvent e) {
-                capture.disconnecting(); // release everything on the controlled machine first
+                dispose();
                 controller.disconnect();
             }
 
@@ -88,7 +89,18 @@ final class ControlFrame extends JFrame {
 
     @Override
     public void dispose() {
+        if (disposed) return;
+        disposed = true;
+        capture.disconnecting();
         statsTimer.stop();
+        panel.removeMouseListener(capture);
+        panel.removeMouseMotionListener(capture);
+        panel.removeMouseWheelListener(capture);
+        panel.removeKeyListener(capture);
+        panel.removeFocusListener(capture);
+        for (var listener : getWindowListeners()) removeWindowListener(listener);
+        for (var listener : getWindowFocusListeners()) removeWindowFocusListener(listener);
+        for (var listener : getWindowStateListeners()) removeWindowStateListener(listener);
         super.dispose();
     }
 }

@@ -1,17 +1,13 @@
 package com.ltm.rd.server;
 
-import com.ltm.rd.viewer.ControlView;
-import com.ltm.rd.viewer.InputOutcome;
-
 import static com.ltm.rd.common.FakeClock.s;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.ltm.rd.client.ClientConfig;
 import com.ltm.rd.client.ClientHooks;
+import com.ltm.rd.client.ClientPhase;
 import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.host.FakeInputDevice;
-import com.ltm.rd.host.FakeScreenSource;
-import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.client.ClientTestAccess;
 import com.ltm.rd.client.SocketConnector;
 import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
@@ -25,6 +21,11 @@ import com.ltm.rd.common.SessionLifecycle;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.common.TrafficSnapshot;
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
+import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.viewer.ControlView;
+import com.ltm.rd.viewer.InputOutcome;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
@@ -54,6 +55,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -88,19 +90,24 @@ class ServerSessionControlTest {
         t.setDaemon(true);
         return t;
     });
-    private final List<ServerSession> sessions = new ArrayList<>();
+    private final List<ClientSession> sessions = new ArrayList<>();
     private final List<Sink> sinks = new ArrayList<>();
     private final List<Ticker> tickers = new ArrayList<>();
+    private final Ticker idleTicker = new Ticker(Duration.ofHours(1), () -> 0L);
     private final List<CountDownLatch> gates = new ArrayList<>();
+
+    private final ServerTestAccess.HostResources hostResources = new ServerTestAccess.HostResources();
 
     @AfterEach
     void shutdown() {
         gates.forEach(CountDownLatch::countDown);
-        for (ServerSession s : sessions) s.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "done", false));
+        for (ClientSession s : sessions) s.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "done", false));
         tickers.forEach(Ticker::close);
+        idleTicker.close();
         pool.shutdownNow();
         scheduler.shutdownNow();
         cleanup.shutdownNow();
+        hostResources.close();
     }
 
     /** Bytes become visible only on flush; an optional gate blocks the writer inside its first write. */
@@ -171,38 +178,43 @@ class ServerSessionControlTest {
         }
     }
 
-    private ServerSession newSession(LongSupplier clock, Ticker ticker) {
-        SessionLifecycle<ServerPhase> lifecycle = new SessionLifecycle<>(ServerPhase.RESERVED, ServerPhase.CLOSING,
-                System::nanoTime, Duration.ofMillis(50), scheduler, cleanup);
-        ServerSession.Env env = new ServerSession.Env(TIMEOUTS, clock, ticker, () -> false, null, false);
-        ServerSession session = new ServerSession(1, TOKEN, InetAddress.getLoopbackAddress(), 0, lifecycle, env);
+    private ClientSession newSession(LongSupplier clock, Ticker ticker) {
+        if (ticker == null) ticker = idleTicker;
+        ClientSession session = new ClientSession(new ClientConfig("127.0.0.1", 1, 2, "123456", TIMEOUTS, clock),
+                1, SocketConnector.DEFAULT, ClientHooks.none(), ticker, scheduler, cleanup);
+        session.lifecycle().atomically(tx -> tx.advance(ClientPhase.CONNECTING, ClientPhase.AUTHENTICATING));
         sessions.add(session);
         return session;
     }
 
     /** A RESERVED session whose command channel is attached (no SCREEN_INFO, no image channel). */
-    private ServerSession reserved(LongSupplier clock, Ticker ticker, Sink sink) throws Exception {
-        ServerSession session = newSession(clock, ticker);
+    private ClientSession reserved(LongSupplier clock, Ticker ticker, Sink sink) throws Exception {
+        ClientSession session = newSession(clock, ticker);
         sinks.add(sink);
         PendingConnection cmdPending = new PendingConnection(new Socket(), 0);
         Channel cmd = new Channel(cmdPending.socket(), new DataInputStream(new IdleInput()), new DataOutputStream(sink));
-        assertTrue(session.attachCommandChannel(cmdPending, cmd, 0));
+        session.lifecycle().register(cmd.socket());
+        session.lifecycle().addStopHook(cmd::closeWrappersQuietly);
+        assertTrue(ClientTestAccess.attachCommandChannel(session, cmd));
         return session;
     }
 
-    private ServerSession active() throws Exception {
+    private ClientSession active() throws Exception {
         return active(() -> 0L, null, new Sink(null));
     }
 
-    private ServerSession active(LongSupplier clock, Ticker ticker, Sink sink) throws Exception {
-        ServerSession session = reserved(clock, ticker, sink);
-        session.dispatch(Packet.screenInfo(1920, 1080));
+    private ClientSession active(LongSupplier clock, Ticker ticker, Sink sink) throws Exception {
+        ClientSession session = reserved(clock, ticker, sink);
+        ClientTestAccess.dispatch(session, Packet.screenInfo(1920, 1080));
         PendingConnection imgPending = new PendingConnection(new Socket(), 0);
-        Channel img = new Channel(imgPending.socket(), new DataInputStream(new ByteArrayInputStream(new byte[0])),
+        Channel img = new Channel(imgPending.socket(), new DataInputStream(new IdleInput()),
                 new DataOutputStream(OutputStream.nullOutputStream()));
-        assertEquals(ServerSession.AttachResult.ATTACHED,
-                session.attachImage(Packet.attach(TOKEN).attachPayload(), imgPending, img, 0));
-        assertEquals(ServerPhase.ACTIVE, session.phase());
+        session.lifecycle().register(img.socket());
+        session.lifecycle().addStopHook(img::closeWrappersQuietly);
+        ClientTestAccess.attachImageChannel(session, img);
+        ClientTestAccess.dispatch(session, Packet.sessionActive());
+        ClientTestAccess.dispatch(session, Packet.ping(0)); // deterministic writer preamble for FIFO/overflow tests
+        assertEquals(ClientPhase.ACTIVE, session.phase());
         return session;
     }
 
@@ -210,7 +222,7 @@ class ServerSessionControlTest {
         return new BufferedImage(8, 8, BufferedImage.TYPE_INT_RGB);
     }
 
-    private List<Packet> writtenPackets(ServerSession session, int count) throws Exception {
+    private List<Packet> writtenPackets(ClientSession session, int count) throws Exception {
         Sink sink = sinks.get(sessions.indexOf(session));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_S);
         while (true) {
@@ -227,7 +239,7 @@ class ServerSessionControlTest {
         }
     }
 
-    private List<PacketType> written(ServerSession session, int count) throws Exception {
+    private List<PacketType> written(ClientSession session, int count) throws Exception {
         return writtenPackets(session, count).stream().map(Packet::type).toList();
     }
 
@@ -235,57 +247,57 @@ class ServerSessionControlTest {
 
     @Test
     void inputEpochStartsAtZeroAndTracksMonitorRevision() throws Exception {
-        ServerSession session = active();
+        ClientSession session = active();
         List<Long> seen = new java.util.concurrent.CopyOnWriteArrayList<>();
         session.addFrameObserver((revision, t) -> seen.add(revision));
         assertEquals(0, session.inputEpoch(), "before the first frame");
         session.tick(s(3)); // STALL_START
         assertEquals(1, session.inputEpoch());
-        session.publishFrame(1, image(), s(4)); // STALL_END
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(4)); // STALL_END
         assertEquals(2, session.inputEpoch());
         assertEquals(List.of(1L, 2L), seen, "the epoch equals the revision the observer saw");
     }
 
     @Test
     void offerInputWithCurrentEpochIsSent() throws Exception {
-        ServerSession session = active();
-        session.publishFrame(1, image(), s(1));
+        ClientSession session = active();
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
         assertEquals(InputOutcome.SENT, session.offerInput(0, Packet.keyPress(17)));
         List<Packet> packets = writtenPackets(session, 2);
-        assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.KEY_PRESS),
+        assertEquals(List.of(PacketType.PONG, PacketType.KEY_PRESS),
                 packets.stream().map(Packet::type).toList());
         assertEquals(17, packets.get(1).keyCode());
     }
 
     @Test
     void offerInputDuringStallIsGateClosed() throws Exception {
-        ServerSession session = active();
-        session.publishFrame(1, image(), s(1));
+        ClientSession session = active();
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
         session.tick(s(4)); // STALL_START: epoch 1
         assertEquals(1, session.inputEpoch());
         assertEquals(InputOutcome.GATE_CLOSED, session.offerInput(1, Packet.keyPress(17)));
-        assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL), written(session, 2));
+        assertEquals(List.of(PacketType.PONG, PacketType.RELEASE_ALL), written(session, 2));
     }
 
     @Test
     void offerInputWithOldEpochAfterRecoveryIsStale() throws Exception {
-        ServerSession session = active();
-        session.publishFrame(1, image(), s(1));
+        ClientSession session = active();
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
         long captured = session.inputEpoch();
         assertEquals(0, captured);
         session.tick(s(4)); // STALL_START
-        session.publishFrame(1, image(), s(5)); // STALL_END
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(5)); // STALL_END
         assertEquals(2, session.inputEpoch());
         assertEquals(InputOutcome.STALE_EPOCH, session.offerInput(captured, Packet.keyPress(17)));
         assertEquals(InputOutcome.SENT, session.offerInput(2, Packet.keyPress(17)));
-        assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL, PacketType.KEY_PRESS),
+        assertEquals(List.of(PacketType.PONG, PacketType.RELEASE_ALL, PacketType.KEY_PRESS),
                 written(session, 3));
     }
 
     @Test
     void epochCheckGateAndOfferAreOneTransaction() throws Exception {
-        ServerSession session = active();
-        session.publishFrame(1, image(), s(1)); // gate open at epoch 0
+        ClientSession session = active();
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1)); // gate open at epoch 0
         CountDownLatch inside = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         // the stall decision is taken inside this transaction, which then stays open
@@ -308,7 +320,7 @@ class ServerSessionControlTest {
         InputOutcome outcome = input.get(WAIT_S, TimeUnit.SECONDS);
         assertNotEquals(InputOutcome.SENT, outcome);
         assertTrue(outcome == InputOutcome.GATE_CLOSED || outcome == InputOutcome.STALE_EPOCH, "was " + outcome);
-        assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL), written(session, 2));
+        assertEquals(List.of(PacketType.PONG, PacketType.RELEASE_ALL), written(session, 2));
     }
 
     /**
@@ -317,7 +329,7 @@ class ServerSessionControlTest {
      * transactions contend for it as closely as possible. The short pause only widens the window;
      * no result depends on it.
      */
-    private InputOutcome offerRacing(ServerSession session, long epoch, Runnable racer) throws Exception {
+    private InputOutcome offerRacing(ClientSession session, long epoch, Runnable racer) throws Exception {
         CountDownLatch started = new CountDownLatch(2);
         List<Future<?>> futures = session.lifecycle().atomically(tx -> {
             Future<?> offer = pool.submit(() -> {
@@ -342,7 +354,7 @@ class ServerSessionControlTest {
     }
 
     /** Like {@link #written} but polls fast: the race tests below run 10_000 iterations. */
-    private List<PacketType> writtenFast(ServerSession session, int count) throws Exception {
+    private List<PacketType> writtenFast(ClientSession session, int count) throws Exception {
         Sink sink = sinks.get(sessions.indexOf(session));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_S);
         while (true) {
@@ -369,17 +381,17 @@ class ServerSessionControlTest {
     void offerInputRacingStallStartNeverQueuesKeyAfterReleaseAll() throws Exception {
         int sent = 0;
         for (int i = 0; i < 10_000; i++) {
-            ServerSession session = active();
-            session.publishFrame(1, image(), s(1)); // gate open at epoch 0
+            ClientSession session = active();
+            ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1)); // gate open at epoch 0
             InputOutcome outcome = offerRacing(session, 0, () -> session.tick(s(4))); // STALL_START
             if (outcome == InputOutcome.SENT) {
                 sent++;
-                assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.KEY_PRESS, PacketType.RELEASE_ALL),
+                assertEquals(List.of(PacketType.PONG, PacketType.KEY_PRESS, PacketType.RELEASE_ALL),
                         writtenFast(session, 3), "iteration " + i);
             } else {
                 assertTrue(outcome == InputOutcome.GATE_CLOSED || outcome == InputOutcome.STALE_EPOCH,
                         "iteration " + i + ": " + outcome);
-                assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL), writtenFast(session, 2),
+                assertEquals(List.of(PacketType.PONG, PacketType.RELEASE_ALL), writtenFast(session, 2),
                         "iteration " + i);
             }
             session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "done", false));
@@ -391,14 +403,14 @@ class ServerSessionControlTest {
     @Test
     void offerInputRacingStallEndWithStalledEpochIsNeverSent() throws Exception {
         for (int i = 0; i < 10_000; i++) {
-            ServerSession session = active();
-            session.publishFrame(1, image(), s(1));
+            ClientSession session = active();
+            ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
             session.tick(s(4)); // STALL_START: epoch 1, gate closed
             assertEquals(1, session.inputEpoch());
-            InputOutcome outcome = offerRacing(session, 1, () -> session.publishFrame(1, image(), s(5))); // STALL_END
+            InputOutcome outcome = offerRacing(session, 1, () -> ClientTestAccess.controlSide(session).publishFrame(1, image(), s(5))); // STALL_END
             assertTrue(outcome == InputOutcome.GATE_CLOSED || outcome == InputOutcome.STALE_EPOCH,
                     "iteration " + i + ": " + outcome);
-            assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL), writtenFast(session, 2),
+            assertEquals(List.of(PacketType.PONG, PacketType.RELEASE_ALL), writtenFast(session, 2),
                     "iteration " + i);
             session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "done", false));
         }
@@ -406,8 +418,8 @@ class ServerSessionControlTest {
 
     @Test
     void offerInputRejectsNonInputPackets() throws Exception {
-        ServerSession session = active();
-        session.publishFrame(1, image(), s(1));
+        ClientSession session = active();
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
         assertThrows(IllegalArgumentException.class, () -> session.offerInput(0, Packet.ping(1)));
         assertThrows(IllegalArgumentException.class, () -> session.offerInput(0, Packet.releaseAll()));
     }
@@ -416,22 +428,22 @@ class ServerSessionControlTest {
 
     @Test
     void releaseControlInputWorksWhileGateClosed() throws Exception {
-        ServerSession session = active();
-        session.publishFrame(1, image(), s(1));
+        ClientSession session = active();
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
         session.tick(s(4)); // STALL_START: the gate is closed and RELEASE_ALL (stall) queued
         assertFalse(session.controlEnabled());
         assertEquals(CommandWriter.OfferResult.ACCEPTED, session.releaseControlInput());
         assertEquals(1, session.releaseAllSent());
         assertEquals(1, session.controlReleasesSent());
-        assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.RELEASE_ALL, PacketType.RELEASE_ALL),
+        assertEquals(List.of(PacketType.PONG, PacketType.RELEASE_ALL, PacketType.RELEASE_ALL),
                 written(session, 3));
     }
 
     @Test
     void releaseControlInputBeforeActiveReturnsClosed() throws Exception {
         Sink sink = new Sink(null);
-        ServerSession session = reserved(() -> 0L, null, sink);
-        assertEquals(ServerPhase.RESERVED, session.phase());
+        ClientSession session = reserved(() -> 0L, null, sink);
+        assertEquals(ClientPhase.ATTACHING, session.phase());
         assertEquals(CommandWriter.OfferResult.CLOSED, session.releaseControlInput());
         assertEquals(0, session.controlReleasesSent());
         assertEquals(0, sink.snapshot().length, "nothing was queued");
@@ -442,14 +454,14 @@ class ServerSessionControlTest {
         CountDownLatch gate = new CountDownLatch(1);
         gates.add(gate);
         Sink sink = new Sink(gate);
-        ServerSession session = active(() -> 0L, null, sink);
-        session.publishFrame(1, image(), s(1));
+        ClientSession session = active(() -> 0L, null, sink);
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
         assertTrue(sink.entered.await(WAIT_S, TimeUnit.SECONDS), "the writer is stuck inside its first write");
         for (int i = 0; i < CommandWriter.DEFAULT_CAPACITY; i++) {
             assertEquals(InputOutcome.SENT, session.offerInput(0, Packet.keyPress(i + 1)), "fill " + i);
         }
         assertEquals(CommandWriter.OfferResult.OVERFLOW, session.releaseControlInput());
-        assertEquals(Packet.DisconnectReason.OVERFLOW, session.closeInfo().orElseThrow().reason());
+        assertEquals(Packet.DisconnectReason.OVERFLOW, session.lifecycle().closeInfo().orElseThrow().reason());
         assertEquals(0, session.controlReleasesSent());
     }
 
@@ -457,15 +469,15 @@ class ServerSessionControlTest {
 
     @Test
     void controlViewIsOneConsistentSnapshot() throws Exception {
-        ServerSession session = active();
-        session.publishFrame(1, image(), s(1));
-        session.publishFrame(1, image(), s(1));
+        ClientSession session = active();
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
         ControlView view = session.controlView();
         assertEquals(2, view.framesReceived());
         assertSame(session.latestFrame().orElseThrow(), view.frame());
         assertTrue(view.controlEnabled());
         assertEquals(1, view.generation());
-        assertEquals(ServerPhase.ACTIVE, view.phase());
+        assertEquals(ClientPhase.ACTIVE, view.phase());
         assertEquals(0, view.inputEpoch());
     }
 
@@ -474,10 +486,10 @@ class ServerSessionControlTest {
         CyclicBarrier barrier = new CyclicBarrier(2);
         int iterations = 10_000;
         for (int i = 0; i < iterations; i++) {
-            ServerSession session = active();
+            ClientSession session = active();
             Future<?> publisher = pool.submit(() -> {
                 barrier.await(WAIT_S, TimeUnit.SECONDS);
-                session.publishFrame(1, image(), s(1));
+                ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
                 return null;
             });
             Future<ControlView> reader = pool.submit(() -> {
@@ -496,16 +508,16 @@ class ServerSessionControlTest {
 
     @Test
     void disconnectClosesWithUserAndSendsDisconnect() throws Exception {
-        ServerSession session = active();
-        assertEquals(List.of(PacketType.SESSION_ACTIVE), written(session, 1)); // the writer is running
-        session.disconnect();
-        CloseInfo info = session.closeInfo().orElseThrow();
+        ClientSession session = active();
+        assertEquals(List.of(PacketType.PONG), written(session, 1)); // the writer is running
+        session.cancel();
+        CloseInfo info = session.lifecycle().closeInfo().orElseThrow();
         assertEquals(Packet.DisconnectReason.USER, info.reason());
         assertTrue(info.sendDisconnect());
         session.terminated().get(WAIT_S, TimeUnit.SECONDS);
         session.socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
-        assertTrue(session.closeInfo().isPresent());
-        assertEquals(List.of(PacketType.SESSION_ACTIVE, PacketType.DISCONNECT), written(session, 2));
+        assertTrue(session.lifecycle().closeInfo().isPresent());
+        assertEquals(List.of(PacketType.PONG, PacketType.DISCONNECT), written(session, 2));
     }
 
     @Test
@@ -513,22 +525,22 @@ class ServerSessionControlTest {
         FakeClock clock = new FakeClock();
         Ticker ticker = new Ticker(Duration.ofMillis(5), clock);
         tickers.add(ticker);
-        ServerSession session = active(clock, ticker, new Sink(null));
+        ClientSession session = active(clock, ticker, new Sink(null));
         assertTrue(session.rttNanos().isEmpty());
         clock.set(s(2)); // the heartbeat sends PING(1) on the next ticker tick
         List<Packet> packets = writtenPackets(session, 2);
         assertEquals(PacketType.PING, packets.get(1).type());
         assertEquals(1, packets.get(1).seq());
-        session.dispatch(Packet.pong(99)); // does not match the outstanding ping
+        ClientTestAccess.dispatch(session, Packet.pong(99)); // does not match the outstanding ping
         assertTrue(session.rttNanos().isEmpty());
         clock.set(s(2) + Duration.ofMillis(40).toNanos());
-        session.dispatch(Packet.pong(1));
+        ClientTestAccess.dispatch(session, Packet.pong(1));
         assertEquals(40_000_000L, session.rttNanos().orElseThrow());
     }
 
     @Test
     void trafficReportsPerChannelBytes() throws Exception {
-        ServerCore core = new ServerCore(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, TIMEOUTS,
+        ServerCore core = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, TIMEOUTS,
                 System::nanoTime, new SecureRandom()));
         Ticker ticker = new Ticker(Duration.ofMillis(100), System::nanoTime);
         tickers.add(ticker);
@@ -540,25 +552,27 @@ class ServerSessionControlTest {
             core.start();
             ClientConfig cfg = new ClientConfig("127.0.0.1", core.cmdPort(), core.imgPort(),
                     core.sessions().currentCode(), TIMEOUTS, System::nanoTime);
-            client = new ClientSession(cfg, 1, executor, new FakeScreenSource(640, 360), SocketConnector.DEFAULT,
+            client = new ClientSession(cfg, 1, SocketConnector.DEFAULT,
                     ClientHooks.none(), ticker, scheduler, cleanup);
             assertTrue(client.start());
             client.activated().get(WAIT_S, TimeUnit.SECONDS);
             ServerSession server = core.sessions().current().orElseThrow();
-            awaitTrue(() -> server.framesReceived() > 0);
+            awaitTrue(() -> server.framesSent() > 0);
+            ClientSession viewer = client;
+            awaitTrue(() -> viewer.framesReceived() > 0);
 
             TrafficSnapshot t = server.traffic();
             assertTrue(t.cmdOut() > 0, "SESSION_ACTIVE went out on the command channel");
-            assertTrue(t.cmdIn() > 0, "SCREEN_INFO came in on the command channel");
-            assertTrue(t.imgIn() > 0, "frames came in on the image channel");
-            assertEquals(0, t.imgOut(), "nothing is ever written to the image channel");
+            assertTrue(t.cmdIn() > 0, "AUTH came in on the command channel");
+            assertTrue(t.imgOut() > 0, "frames went out on the image channel");
+            assertEquals(26, t.imgIn(), "the Host read only the framed ATTACH on the image channel");
 
             TrafficSnapshot c = client.traffic();
             assertTrue(c.cmdOut() > 0);
             assertTrue(c.cmdIn() > 0);
-            assertTrue(c.imgOut() > 0);
-            assertEquals(0, c.imgIn());
-            assertTrue(client.framesSent() > 0);
+            assertTrue(c.imgIn() > 0);
+            assertEquals(26, c.imgOut(), "the Viewer wrote only the framed ATTACH on the image channel");
+            assertTrue(client.framesReceived() > 0);
         } finally {
             if (client != null) client.cancel();
             core.close();
@@ -572,5 +586,222 @@ class ServerSessionControlTest {
             assertTrue(System.nanoTime() < deadline, "condition not reached in time");
             LockSupport.parkNanos(1_000_000);
         }
+    }
+
+    private final FakeClock clock = new FakeClock();
+    private ClientSession reserved(Sink sink) throws Exception { return reserved(clock, null, sink); }
+    private ClientSession active(Sink sink) throws Exception { return active(clock, null, sink); }
+    private Sink gatedSink() {
+        CountDownLatch gate = new CountDownLatch(1);
+        gates.add(gate);
+        return new Sink(gate);
+    }
+    private static void awaitEntered(Sink sink) throws Exception {
+        assertTrue(sink.entered.await(WAIT_S, TimeUnit.SECONDS), "the writer is stuck inside its first write");
+    }
+    private static CloseInfo closeInfo(ClientSession session) { return session.lifecycle().closeInfo().orElseThrow(); }
+    /** With the writer stuck in its first write, fills the 256-slot queue with input the gate lets through. */
+    private static void fillWithInput(ClientSession session) {
+        for (int i = 0; i < CommandWriter.DEFAULT_CAPACITY; i++) {
+            assertEquals(InputOutcome.SENT, session.offerInput(0, Packet.keyPress(i + 1)), "fill " + i);
+        }
+    }
+
+    @Test
+    void epochAndActiveInstantAreEmptyUntilActive() throws Exception {
+        ClientSession session = reserved(new Sink(null));
+        assertEquals(0, session.inputEpoch());
+        assertTrue(session.activeAtNanos().isEmpty());
+
+        clock.set(s(2));
+        ClientTestAccess.dispatch(session, Packet.screenInfo(1920, 1080));
+        Channel img = new Channel(new Socket(), new DataInputStream(new IdleInput()),
+                new DataOutputStream(OutputStream.nullOutputStream()));
+        session.lifecycle().register(img.socket());
+        session.lifecycle().addStopHook(img::closeWrappersQuietly);
+        ClientTestAccess.attachImageChannel(session, img);
+        ClientTestAccess.dispatch(session, Packet.sessionActive());
+
+        assertEquals(ClientPhase.ACTIVE, session.phase());
+        assertEquals(s(2), session.activeAtNanos().orElseThrow());
+        assertEquals(0, session.inputEpoch(), "ACTIVE with no stall yet is still revision 0");
+    }
+
+    // ---- frames ---------------------------------------------------------------------------------
+
+    @Test
+    void frameOfAnotherGenerationIsDropped() throws Exception {
+        ClientSession session = active(new Sink(null));
+
+        ClientTestAccess.controlSide(session).publishFrame(2, image(), s(1)); // the session is generation 1
+
+        assertEquals(0, session.framesReceived());
+        assertTrue(session.latestFrame().isEmpty());
+        assertFalse(session.controlEnabled(), "a dropped frame cannot open the gate");
+    }
+
+    @Test
+    void frameBeforeActiveIsDropped() throws Exception {
+        ClientSession session = reserved(new Sink(null));
+
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
+
+        assertEquals(0, session.framesReceived());
+        assertTrue(session.latestFrame().isEmpty());
+        assertEquals(ClientPhase.ATTACHING, session.phase());
+    }
+
+    @Test
+    void frameAfterCloseIsDropped() throws Exception {
+        ClientSession session = active(new Sink(null));
+        session.cancel();
+
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
+
+        assertEquals(0, session.framesReceived());
+        assertTrue(session.latestFrame().isEmpty());
+    }
+
+    @Test
+    void tickOnAClosedActiveSessionDecidesNothingMore() throws Exception {
+        ClientSession session = active(new Sink(null));
+        session.cancel();
+        CloseInfo first = closeInfo(session);
+
+        session.tick(s(100)); // far past the frame timeout, but the session is already closing
+
+        assertSame(first, closeInfo(session), "the first close reason stays");
+        assertEquals(Packet.DisconnectReason.USER, first.reason());
+        assertEquals(0, session.releaseAllSent());
+        assertEquals(0, session.inputEpoch(), "no stall or timeout transition was recorded");
+    }
+
+    // ---- overflow on the paths that queue input -------------------------------------------------
+
+    @Test
+    void stallReleaseThatDoesNotFitClosesWithOverflow() throws Exception {
+        Sink sink = gatedSink();
+        ClientSession session = active(sink);
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
+        awaitEntered(sink);
+        fillWithInput(session);
+
+        session.tick(s(4)); // 3 s without a frame: the stall decision must queue RELEASE_ALL
+
+        CloseInfo info = closeInfo(session);
+        assertEquals(Packet.DisconnectReason.OVERFLOW, info.reason());
+        assertEquals(0, session.releaseAllSent(), "the RELEASE_ALL was not accepted");
+    }
+
+    @Test
+    void inputThatDoesNotFitClosesWithOverflow() throws Exception {
+        Sink sink = gatedSink();
+        ClientSession session = active(sink);
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
+        awaitEntered(sink);
+        fillWithInput(session);
+
+        assertEquals(CommandWriter.OfferResult.OVERFLOW, session.offerInput(Packet.keyPress(999)));
+
+        CloseInfo info = closeInfo(session);
+        assertEquals(Packet.DisconnectReason.OVERFLOW, info.reason());
+        assertEquals("command queue overflow", info.message());
+    }
+
+    @Test
+    void epochCheckedInputThatDoesNotFitClosesWithOverflow() throws Exception {
+        Sink sink = gatedSink();
+        ClientSession session = active(sink);
+        ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
+        awaitEntered(sink);
+        fillWithInput(session);
+
+        assertEquals(InputOutcome.OVERFLOW, session.offerInput(0, Packet.keyPress(999)));
+
+        assertEquals(Packet.DisconnectReason.OVERFLOW, closeInfo(session).reason());
+    }
+
+    @Test
+    void releaseControlInputOnAClosedSessionReturnsClosed() throws Exception {
+        ClientSession session = active(new Sink(null));
+        session.cancel();
+
+        assertEquals(CommandWriter.OfferResult.CLOSED, session.releaseControlInput());
+
+        assertEquals(0, session.controlReleasesSent());
+    }
+
+
+    @RepeatedTest(20)
+    void stallRacingInputNeverQueuesKeyAfterReleaseAll() throws Exception {
+        for (boolean stallFirst : new boolean[] {true, false}) {
+            ClientSession session = active();
+            ClientTestAccess.controlSide(session).publishFrame(1, image(), s(1));
+            CyclicBarrier start = new CyclicBarrier(2);
+            CountDownLatch first = new CountDownLatch(1);
+            Future<?> stall = pool.submit(() -> {
+                start.await(WAIT_S, TimeUnit.SECONDS);
+                if (!stallFirst) assertTrue(first.await(WAIT_S, TimeUnit.SECONDS));
+                session.tick(s(4));
+                if (stallFirst) first.countDown();
+                return null;
+            });
+            Future<InputOutcome> input = pool.submit(() -> {
+                start.await(WAIT_S, TimeUnit.SECONDS);
+                if (stallFirst) assertTrue(first.await(WAIT_S, TimeUnit.SECONDS));
+                InputOutcome outcome = session.offerInput(0, Packet.keyPress(17));
+                if (!stallFirst) first.countDown();
+                return outcome;
+            });
+            try {
+                stall.get(WAIT_S, TimeUnit.SECONDS);
+                assertEquals(stallFirst ? InputOutcome.GATE_CLOSED : InputOutcome.SENT, input.get(WAIT_S, TimeUnit.SECONDS));
+                assertEquals(1, session.releaseAllSent());
+                assertFalse(session.controlEnabled());
+                assertEquals(stallFirst ? List.of(PacketType.PONG, PacketType.RELEASE_ALL)
+                        : List.of(PacketType.PONG, PacketType.KEY_PRESS, PacketType.RELEASE_ALL), written(session, stallFirst ? 2 : 3));
+            } finally { first.countDown(); session.cancel(); }
+            session.terminated().get(WAIT_S, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test void controlViewUsesConnectorPhaseAndConsistentGeneration() throws Exception {
+        ClientSession session = new ClientSession(new ClientConfig("127.0.0.1", 1, 2, "123456", TIMEOUTS, () -> 0L),
+                91, SocketConnector.DEFAULT, ClientHooks.none(), idleTicker, scheduler, cleanup);
+        sessions.add(session);
+        ClientPhase initial = session.controlView().phase();
+        assertEquals(ClientPhase.CONNECTING, initial);
+        assertEquals(91, session.controlView().generation());
+        session.lifecycle().atomically(tx -> tx.advance(ClientPhase.CONNECTING, ClientPhase.AUTHENTICATING));
+        assertEquals(ClientPhase.AUTHENTICATING, session.controlView().phase());
+        Channel command = new Channel(new Socket(), new DataInputStream(new IdleInput()),
+                new DataOutputStream(new ByteArrayOutputStream()));
+        session.lifecycle().register(command.socket());
+        session.lifecycle().addStopHook(command::closeWrappersQuietly);
+        assertTrue(ClientTestAccess.attachCommandChannel(session, command));
+        assertEquals(ClientPhase.ATTACHING, session.controlView().phase());
+        ClientTestAccess.dispatch(session, Packet.screenInfo(1920, 1080));
+        Channel imageChannel = new Channel(new Socket(), new DataInputStream(new IdleInput()),
+                new DataOutputStream(OutputStream.nullOutputStream()));
+        session.lifecycle().register(imageChannel.socket());
+        session.lifecycle().addStopHook(imageChannel::closeWrappersQuietly);
+        ClientTestAccess.attachImageChannel(session, imageChannel);
+        ClientTestAccess.dispatch(session, Packet.sessionActive());
+        assertEquals(ClientPhase.ACTIVE, session.controlView().phase());
+        assertFalse(session.controlView().controlEnabled());
+        BufferedImage frame = image();
+        ClientTestAccess.controlSide(session).publishFrame(91, frame, s(1));
+        ControlView view = session.controlView();
+        assertEquals(ClientPhase.ACTIVE, view.phase());
+        assertEquals(91, view.generation());
+        assertEquals(0, view.inputEpoch());
+        assertSame(frame, view.frame());
+        assertEquals(1, view.framesReceived());
+        assertTrue(view.controlEnabled());
+        assertFalse(view.controlEnabled() && view.frame() == null);
+        session.cancel();
+        assertEquals(ClientPhase.CLOSING, session.controlView().phase());
+        assertFalse(session.controlView().controlEnabled());
+        session.terminated().get(WAIT_S, TimeUnit.SECONDS);
     }
 }

@@ -1,11 +1,5 @@
 package com.ltm.rd.client;
 
-import com.ltm.rd.host.FakeInputDevice;
-import com.ltm.rd.host.FakeScreenSource;
-import com.ltm.rd.host.InputExecutor;
-import com.ltm.rd.host.ScreenGeometry;
-import com.ltm.rd.host.ScreenSource;
-
 import static com.ltm.rd.common.FakeClock.s;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -15,6 +9,11 @@ import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.Timeouts;
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
+import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.host.ScreenGeometry;
+import com.ltm.rd.host.ScreenSource;
 import com.ltm.rd.it.RawPeer;
 import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
@@ -97,8 +96,7 @@ class ClientSessionHandshakeEdgesTest {
     private ClientSession client(RawPeer.Server rs, SocketConnector connector, ClientHooks hooks,
             ScreenSource screen) {
         ClientConfig cfg = new ClientConfig("127.0.0.1", rs.cmdPort(), rs.imgPort(), "123456", TIMEOUTS, clock);
-        ClientSession c = new ClientSession(cfg, generations.incrementAndGet(), executor, screen, connector, hooks,
-                idleTicker, scheduler, cleanup);
+        ClientSession c = new ClientSession(cfg, generations.incrementAndGet(), connector, hooks, idleTicker, scheduler, cleanup);
         clients.add(c);
         return c;
     }
@@ -124,7 +122,7 @@ class ClientSessionHandshakeEdgesTest {
     private RawPeer attaching(RawPeer.Server rs) throws IOException {
         RawPeer cmd = acceptAuth(rs);
         cmd.send(Packet.authResult(Packet.AuthStatus.OK, token()));
-        cmd.readUntil(PacketType.SCREEN_INFO);
+        cmd.send(Packet.screenInfo(1920, 1080));
         assertEquals(PacketType.ATTACH, track(rs.acceptImg()).read().type());
         return cmd;
     }
@@ -187,6 +185,61 @@ class ClientSessionHandshakeEdgesTest {
 
     // ---- start and early ticks -----------------------------------------------------------------
 
+    @Test void coalescedAuthResultAndScreenInfoReusesInputStream() throws Exception {
+        RawPeer.Server rs = rawServer();
+        ClientSession c = client(rs);
+        c.start();
+        RawPeer cmd = acceptAuth(rs);
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        java.io.DataOutputStream packets = new java.io.DataOutputStream(bytes);
+        com.ltm.rd.common.PacketIO.write(packets, Packet.authResult(Packet.AuthStatus.OK, token()));
+        com.ltm.rd.common.PacketIO.write(packets, Packet.screenInfo(1920, 1080));
+        cmd.socket.getOutputStream().write(bytes.toByteArray());
+        cmd.socket.getOutputStream().flush();
+        cmd.send(Packet.sessionActive());
+        assertDoesNotThrow(() -> c.activated().get(WAIT_S, TimeUnit.SECONDS));
+        RawPeer img = track(rs.acceptImg());
+        assertEquals(PacketType.ATTACH, img.read().type());
+        assertEquals(ClientPhase.ACTIVE, c.phase());
+    }
+
+    @Test void activationDeadlineIncludesCommandHandoverLockWait() throws Exception {
+        RawPeer.Server rs = rawServer();
+        ClientSession viewer = client(rs);
+        boolean authenticating = viewer.lifecycle().atomically(tx -> tx.advance(ClientPhase.CONNECTING, ClientPhase.AUTHENTICATING));
+        assertTrue(authenticating);
+        var worker = new java.util.concurrent.atomic.AtomicReference<Thread>();
+        var entered = new CountDownLatch(1);
+        var caller = Executors.newSingleThreadExecutor();
+        try (var input = new java.io.PipedInputStream(); var peer = new java.io.PipedOutputStream(input)) {
+            var socket = viewer.lifecycle().register(new java.net.Socket());
+            var channel = new com.ltm.rd.common.Channel(socket, new java.io.DataInputStream(input),
+                    new java.io.DataOutputStream(new java.io.ByteArrayOutputStream()));
+            var handedOver = viewer.lifecycle().atomically(tx -> {
+                var result = caller.submit(() -> {
+                    worker.set(Thread.currentThread());
+                    entered.countDown();
+                    return viewer.attachCommandChannel(channel);
+                });
+                try { assertTrue(entered.await(WAIT_S, TimeUnit.SECONDS)); }
+                catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new AssertionError(failure); }
+                long bound = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_S);
+                while (worker.get().getState() != Thread.State.WAITING) {
+                    assertTrue(System.nanoTime() < bound, "handover must wait for the lifecycle lock");
+                    Thread.onSpinWait();
+                }
+                clock.set(TIMEOUTS.clientActivation().toNanos());
+                return result;
+            });
+            assertTrue(handedOver.get(WAIT_S, TimeUnit.SECONDS));
+            viewer.tick(clock.getAsLong());
+            assertTrue(viewer.lifecycle().isClosed(), "lock contention is part of the activation budget from AUTH OK");
+            assertEquals(Packet.DisconnectReason.TIMEOUT, closeInfo(viewer).reason());
+            assertEquals("activation timeout", closeInfo(viewer).message());
+            awaitTerminated(viewer);
+        } finally { caller.shutdownNow(); }
+    }
+
     @Test
     void startingTwiceConnectsOnce() throws Exception {
         RawPeer.Server rs = rawServer();
@@ -210,7 +263,7 @@ class ClientSessionHandshakeEdgesTest {
     void releaseAllReceivedIsZeroBeforeTheCommandChannelExists() throws Exception {
         ClientSession c = client(rawServer());
 
-        assertEquals(0, c.releaseAllReceived());
+        assertEquals(0, c.releaseAllSent());
     }
 
     @Test
@@ -266,7 +319,7 @@ class ClientSessionHandshakeEdgesTest {
         CloseInfo info = closeInfo(c);
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
         assertEquals("protocol violation", info.message());
-        assertEquals(0, c.inputBeginCount());
+        assertEquals(0, c.framesReceived());
     }
 
     @Test
@@ -286,7 +339,7 @@ class ClientSessionHandshakeEdgesTest {
         CloseInfo info = closeInfo(c);
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
         assertEquals("handshake failed", info.message());
-        assertEquals(0, c.inputBeginCount());
+        assertEquals(0, c.framesReceived());
     }
 
     // ---- cancelled while a step of the handshake is in progress ---------------------------------------
@@ -318,34 +371,33 @@ class ClientSessionHandshakeEdgesTest {
         assertEquals(1, connects.get(), "after the cancel the handshake went no further");
         assertEquals(Packet.DisconnectReason.USER, closeInfo(c).reason());
         assertEquals("cancelled", closeInfo(c).message());
-        assertEquals(0, c.inputBeginCount());
+        assertEquals(0, c.framesReceived());
         assertTrue(c.authFailure().isEmpty());
     }
 
     @Test
-    void cancelBetweenAuthResultAndCommandChannelHandOverStartsNothing() throws Exception {
+    void cancelDuringImageConnectNeverActivates() throws Exception {
         RawPeer.Server rs = rawServer();
-        GatedGeometry screen = new GatedGeometry();
+        HeldHook beforeImageConnect = new HeldHook();
         AtomicInteger connects = new AtomicInteger();
         SocketConnector counting = (socket, address, timeoutMs) -> {
             connects.incrementAndGet();
+            if (address.getPort() == rs.imgPort()) beforeImageConnect.run();
             SocketConnector.DEFAULT.connect(socket, address, timeoutMs);
         };
-        ClientSession c = client(rs, counting, ClientHooks.none(), screen);
+        ClientSession c = client(rs, counting, ClientHooks.none(), new FakeScreenSource(1920, 1080));
         c.start();
         RawPeer cmd = acceptAuth(rs);
         cmd.send(Packet.authResult(Packet.AuthStatus.OK, token()));
-        assertTrue(screen.reached.await(WAIT_S, TimeUnit.SECONDS), "the client read AUTH_RESULT and asks for the geometry");
-
+        assertTrue(beforeImageConnect.reached.await(WAIT_S, TimeUnit.SECONDS));
         c.cancel();
-        screen.release.countDown();
-
+        beforeImageConnect.release.countDown();
         awaitTerminated(c);
-        assertEquals(1, connects.get(), "no image connection after the cancel");
+        assertEquals(2, connects.get(), "both registered channel attempts are accounted for before cancellation");
         assertEquals("cancelled", closeInfo(c).message());
-        assertEquals(0, c.inputBeginCount());
         assertFalse(c.activationReceived());
-        assertThrows(IOException.class, cmd::read, "no SCREEN_INFO (or anything else) was sent");
+        assertEquals(0, c.framesReceived());
+        assertEquals(Packet.DisconnectReason.USER, cmd.readUntil(PacketType.DISCONNECT).disconnectPayload().reason());
     }
 
     // ---- image channel ---------------------------------------------------------------------------
@@ -369,7 +421,7 @@ class ClientSessionHandshakeEdgesTest {
         assertEquals("connect failed", info.message());
         assertFalse(info.sendDisconnect());
         assertTrue(c.activated().isCompletedExceptionally());
-        assertEquals(0, c.inputBeginCount());
+        assertEquals(0, c.framesReceived());
     }
 
     // ---- SESSION_ACTIVE out of turn ------------------------------------------------------------------
@@ -387,11 +439,11 @@ class ClientSessionHandshakeEdgesTest {
         awaitTerminated(pending);
         CloseInfo pendingInfo = closeInfo(pending);
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, pendingInfo.reason());
-        assertEquals("input before session active", pendingInfo.message());
+        assertEquals("protocol violation", pendingInfo.message());
         assertTrue(pendingInfo.sendDisconnect());
-        assertEquals(0, pending.inputBeginCount());
+        assertEquals(0, pending.framesReceived());
         Packet pendingDisconnect = pendingCmd.readUntil(PacketType.DISCONNECT);
-        assertEquals("input before session active", pendingDisconnect.disconnectPayload().message());
+        assertEquals("protocol violation", pendingDisconnect.disconnectPayload().message());
 
         RawPeer.Server activeServer = rawServer();
         ClientSession active = client(activeServer);
@@ -408,7 +460,7 @@ class ClientSessionHandshakeEdgesTest {
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, activeInfo.reason());
         assertEquals("unexpected SESSION_ACTIVE", activeInfo.message());
         assertTrue(activeInfo.sendDisconnect());
-        assertEquals(1, active.inputBeginCount());
+        assertTrue(active.activationReceived());
         Packet activeDisconnect = activeCmd.readUntil(PacketType.DISCONNECT);
         assertEquals("unexpected SESSION_ACTIVE", activeDisconnect.disconnectPayload().message());
     }
@@ -420,21 +472,21 @@ class ClientSessionHandshakeEdgesTest {
         c.start();
         RawPeer cmd = attaching(rs);
 
-        cmd.send(Packet.screenInfo(1280, 720));
+        cmd.send(Packet.keyPress(65));
 
         awaitTerminated(c);
         CloseInfo info = closeInfo(c);
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
         assertEquals("protocol violation", info.message());
         assertTrue(info.sendDisconnect());
-        assertEquals(0, c.inputBeginCount());
+        assertEquals(0, c.framesReceived());
     }
 
     @Test
     void secondSessionActiveWhileAttachingIsAProtocolViolation() throws Exception {
         RawPeer.Server rs = rawServer();
         HeldHook afterAttach = new HeldHook();
-        ClientSession c = client(rs, SocketConnector.DEFAULT, new ClientHooks(afterAttach, null),
+        ClientSession c = client(rs, SocketConnector.DEFAULT, new ClientHooks(afterAttach),
                 new FakeScreenSource(1920, 1080));
         c.start();
         RawPeer cmd = attaching(rs);
@@ -449,7 +501,7 @@ class ClientSessionHandshakeEdgesTest {
         assertEquals("unexpected SESSION_ACTIVE", info.message());
         assertTrue(info.sendDisconnect());
         assertTrue(c.activationReceived(), "the first SESSION_ACTIVE was taken");
-        assertEquals(0, c.inputBeginCount());
+        assertEquals(0, c.framesReceived());
         Packet disconnect = cmd.read();
         assertEquals(PacketType.DISCONNECT, disconnect.type());
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, disconnect.disconnectPayload().reason());
@@ -471,32 +523,121 @@ class ClientSessionHandshakeEdgesTest {
         CloseInfo info = closeInfo(c);
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
         assertEquals("unexpected SESSION_ACTIVE", info.message());
-        assertEquals(1, c.inputBeginCount(), "input began once and is released on close");
+        assertTrue(c.activationReceived(), "activation was accepted before the duplicate closed the Viewer");
         c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
     }
 
-    @Test
-    void refusedInputSessionClosesWithoutBecomingActive() throws Exception {
-        assertTrue(executor.beginSession(1_000_000), "another session already owns the input"); // client gets 1
+
+    private static Packet packet(com.ltm.rd.common.PacketType type) {
+        return switch (type) {
+            case AUTH -> Packet.auth("123456");
+            case AUTH_RESULT -> Packet.authResult(Packet.AuthStatus.OK, new byte[16]);
+            case ATTACH -> Packet.attach(new byte[16]);
+            case SCREEN_INFO -> Packet.screenInfo(1920, 1080);
+            case SESSION_ACTIVE -> Packet.sessionActive();
+            case FRAME -> Packet.frame(1, 1, new byte[] {1});
+            case MOUSE_MOVE -> Packet.mouseMove(1, 1);
+            case MOUSE_PRESS -> Packet.mousePress(1, 1, 1);
+            case MOUSE_RELEASE -> Packet.mouseRelease(1, 1, 1);
+            case WHEEL -> Packet.wheel(1);
+            case KEY_PRESS -> Packet.keyPress(65);
+            case KEY_RELEASE -> Packet.keyRelease(65);
+            case RELEASE_ALL -> Packet.releaseAll();
+            case PING -> Packet.ping(1);
+            case PONG -> Packet.pong(1);
+            case DISCONNECT -> Packet.disconnect(Packet.DisconnectReason.USER, "test");
+        };
+    }
+
+    private static com.ltm.rd.common.Channel idleChannel() throws IOException {
+        java.io.PipedInputStream in = new java.io.PipedInputStream();
+        new java.io.PipedOutputStream(in);
+        return new com.ltm.rd.common.Channel(new java.net.Socket(), new java.io.DataInputStream(in),
+                new java.io.DataOutputStream(new java.io.ByteArrayOutputStream()));
+    }
+
+    @Test void viewerRejectsEveryDisallowedCommandType() throws Exception {
+        var pending = java.util.EnumSet.of(PacketType.SCREEN_INFO, PacketType.SESSION_ACTIVE,
+                PacketType.PING, PacketType.PONG, PacketType.DISCONNECT);
+        var active = java.util.EnumSet.of(PacketType.PING, PacketType.PONG, PacketType.DISCONNECT);
+        for (boolean activated : new boolean[] {false, true}) {
+            for (PacketType type : PacketType.values()) {
+                if ((activated ? active : pending).contains(type)) continue;
+                ClientSession c = new ClientSession(new ClientConfig("127.0.0.1", 1, 2, "123456", TIMEOUTS, clock),
+                        generations.incrementAndGet(), SocketConnector.DEFAULT, ClientHooks.none(), idleTicker, scheduler, cleanup);
+                clients.add(c);
+                c.lifecycle().atomically(tx -> tx.advance(ClientPhase.CONNECTING, ClientPhase.AUTHENTICATING));
+                var command = idleChannel();
+                c.lifecycle().register(command.socket());
+                c.lifecycle().addStopHook(command::closeWrappersQuietly);
+                assertTrue(c.attachCommandChannel(command));
+                if (activated) {
+                    c.dispatch(Packet.screenInfo(1920, 1080));
+                    var image = idleChannel();
+                    c.lifecycle().register(image.socket());
+                    c.lifecycle().addStopHook(image::closeWrappersQuietly);
+                    c.attachImageChannel(image);
+                    c.dispatch(Packet.sessionActive());
+                    assertEquals(ClientPhase.ACTIVE, c.phase());
+                }
+                c.dispatch(packet(type));
+                assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, closeInfo(c).reason(), type.name());
+                assertEquals(ClientPhase.CLOSING, c.phase());
+                assertEquals(0, c.framesReceived());
+                awaitTerminated(c);
+            }
+        }
+    }
+
+    @Test void secondScreenInfoWhileAttachingCloses() throws Exception {
         RawPeer.Server rs = rawServer();
         ClientSession c = client(rs);
         c.start();
         RawPeer cmd = attaching(rs);
-
-        cmd.send(Packet.sessionActive()); // both start conditions are met; the executor says no
-
+        cmd.send(Packet.screenInfo(1280, 720));
         awaitTerminated(c);
-        CloseInfo info = closeInfo(c);
-        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
-        assertEquals("input session refused", info.message());
-        assertTrue(info.sendDisconnect());
-        assertTrue(c.activated().isCompletedExceptionally(), "never became ACTIVE");
-        assertEquals(0, c.inputBeginCount());
-        assertEquals(0, c.senderRuns());
-        c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
-        Packet disconnect = cmd.read();
-        assertEquals(PacketType.DISCONNECT, disconnect.type());
-        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, disconnect.disconnectPayload().reason());
-        executor.endSession(1_000_000).get(WAIT_S, TimeUnit.SECONDS);
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, closeInfo(c).reason());
+        assertEquals("unexpected SCREEN_INFO", closeInfo(c).message());
+        assertEquals(new Packet.SizePayload(1920, 1080), c.screen().orElseThrow());
+        assertEquals(0, c.framesReceived());
+    }
+
+    @Test void sessionActiveBeforeScreenInfoCloses() throws Exception {
+        RawPeer.Server rs = rawServer();
+        ClientSession c = client(rs);
+        c.start();
+        RawPeer cmd = acceptAuth(rs);
+        cmd.send(Packet.authResult(Packet.AuthStatus.OK, token()));
+        RawPeer img = track(rs.acceptImg());
+        assertEquals(PacketType.ATTACH, img.read().type());
+        img.send(Packet.frame(1, 1, new byte[] {1}));
+        cmd.send(Packet.sessionActive());
+        awaitTerminated(c);
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, closeInfo(c).reason());
+        assertEquals("unexpected SESSION_ACTIVE", closeInfo(c).message());
+        assertFalse(c.activationReceived());
+        assertTrue(c.activated().isCompletedExceptionally());
+        assertEquals(0, c.framesReceived());
+    }
+
+    @Test void v1ServerBadVersionReturnsIdle() throws Exception {
+        RawPeer.Server rs = rawServer();
+        var cfg = new com.ltm.rd.ui.AppConfig(java.net.InetAddress.getLoopbackAddress(), rs.cmdPort(), rs.imgPort(),
+                "127.0.0.1", TIMEOUTS, clock, Duration.ofSeconds(5));
+        var viewer = com.ltm.rd.ui.AppRuntime.forViewer(cfg);
+        try {
+            assertEquals(com.ltm.rd.ui.ConnectOutcome.STARTED, viewer.connect("127.0.0.1", "123456"));
+            RawPeer cmd = track(rs.acceptCmd());
+            assertEquals(2, cmd.read().authPayload().version());
+            cmd.send(Packet.authResult(Packet.AuthStatus.BAD_VERSION, new byte[16]));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_S);
+            while (viewer.snapshot().phase() != com.ltm.rd.ui.UiPhase.IDLE) {
+                assertTrue(System.nanoTime() < deadline);
+                Thread.onSpinWait();
+            }
+            assertEquals("Phiên bản khác nhau. Hãy dùng cùng một bản jar trên hai máy.", viewer.snapshot().message());
+        } finally {
+            assertEquals(com.ltm.rd.ui.InputRelease.NOT_NEEDED, viewer.shutdownAsync().get(WAIT_S, TimeUnit.SECONDS).inputRelease());
+        }
     }
 }

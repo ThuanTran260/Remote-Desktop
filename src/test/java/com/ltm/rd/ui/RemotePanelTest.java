@@ -30,8 +30,8 @@ class RemotePanelTest {
     }
 
     private static Snapshot snapshot(long generation, long epoch, boolean enabled, int w, int h, BufferedImage frame) {
-        return new Snapshot(LaunchOptions.Role.SERVER, UiPhase.ACTIVE, generation, epoch, "", "10.0.0.2", 5001, 5000,
-                "123456", w, h, frame, 1, enabled, TrafficStats.ZERO);
+        return new Snapshot(LaunchOptions.Role.VIEWER, UiPhase.ACTIVE, generation, epoch, "", "10.0.0.2", 5001, 5000,
+                "123456", w, h, frame, 1, enabled, TrafficStats.ZERO, Snapshot.Cleanup.NONE);
     }
 
     private static void onEdt(Runnable r) throws InterruptedException, InvocationTargetException {

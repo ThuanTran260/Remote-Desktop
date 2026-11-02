@@ -33,23 +33,28 @@ class LauncherTest {
     }
 
     @Test
-    void helpWorksInHeadless() {
+    void helpValidatesBeforePrintingAndNeverStartsGui() {
         assertEquals(0, run(true, "--help"));
         assertEquals(LaunchOptions.USAGE, out());
+        assertEquals(0, launched.size());
+        outBytes.reset();
+        assertEquals(2, run(true, "--help", "--role", "invalid-secret123456"));
+        assertEquals("", out());
+        assertTrue(err().contains(LaunchOptions.USAGE));
         assertEquals(0, launched.size());
     }
 
     @Test
     void invalidOptionExitsTwoWithUsage() {
         assertEquals(2, run(false, "--bogus"));
-        assertTrue(err().startsWith("Unknown option: --bogus"), err());
+        assertTrue(err().startsWith("Unsupported argument"), err());
         assertTrue(err().contains(LaunchOptions.USAGE));
         assertEquals(0, launched.size());
     }
 
     @Test
     void serverRoleInHeadlessExitsFourWithoutGui() {
-        assertEquals(4, run(true, "--server"));
+        assertEquals(4, run(true, "--role", "host"));
         assertTrue(err().contains("graphical environment required"), err());
         assertEquals(0, launched.size());
     }
@@ -62,28 +67,28 @@ class LauncherTest {
     }
 
     @Test
-    void clientHostIsPassedToGuiWithoutConnecting() {
-        assertEquals(Launcher.STAY_RUNNING, run(false, "--client", "--host", "10.0.0.5"));
+    void viewerAddressIsPresetWithoutConnecting() {
+        assertEquals(Launcher.STAY_RUNNING, run(false, "--role", "viewer", "--address", "10.0.0.5"));
         assertEquals(1, launched.size());
-        assertEquals("10.0.0.5", launched.get(0).host());
-        assertEquals(LaunchOptions.Role.CLIENT, launched.get(0).role());
+        assertEquals("10.0.0.5", launched.get(0).address());
+        assertEquals(LaunchOptions.Role.VIEWER, launched.get(0).role());
     }
 
     @Test
     void portsArePassedToGui() {
         assertEquals(Launcher.STAY_RUNNING,
-                run(false, "--server", "--cmd-port", "6001", "--img-port", "6000"));
+                run(false, "--role", "host", "--cmd-port", "6001", "--img-port", "6000"));
         assertEquals(6001, launched.get(0).cmdPort());
         assertEquals(6000, launched.get(0).imgPort());
     }
 
     @Test
     void notImplementedMessageIsGone() {
-        run(false, "--server");
-        run(false, "--client");
+        run(false, "--role", "host");
+        run(false, "--role", "viewer");
         run(false);
         run(true, "--help");
-        run(true, "--server");
+        run(true, "--role", "host");
         assertFalse(err().contains("not implemented yet"), err());
         assertFalse(out().contains("not implemented yet"));
     }
@@ -96,11 +101,25 @@ class LauncherTest {
 
     @Test
     void guiStartupFailureIsReportedWithoutDetails() {
-        int code = Launcher.run(new String[] {"--server"}, out, err, false, options -> {
+        int code = Launcher.run(new String[] {"--role", "host"}, out, err, false, options -> {
             throw new IllegalStateException("secret detail 123456");
         });
         assertEquals(1, code);
         assertTrue(err().contains("IllegalStateException"), err());
         assertFalse(err().contains("secret detail"), "the exception text is never printed");
+    }
+
+    @Test
+    void diagnosticsNeverEchoSecrets() {
+        for (String[] args : new String[][] {{"--bogus-secret123456"}, {"--cmd-port", "secret123456"},
+                {"--role", "secret123456"}, {"--help", "--code", "secret123456"}}) {
+            outBytes.reset();
+            errBytes.reset();
+            assertEquals(2, run(false, args));
+            assertEquals("", out());
+            assertFalse(err().contains("secret123456"));
+            assertTrue(err().contains(LaunchOptions.USAGE));
+            assertEquals(0, launched.size());
+        }
     }
 }

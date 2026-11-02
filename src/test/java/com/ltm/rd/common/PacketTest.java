@@ -57,7 +57,7 @@ class PacketTest {
         assertEquals(5001, Protocol.CMD_PORT);
         assertEquals(5000, Protocol.IMG_PORT);
         assertEquals(0x4C544D52, Protocol.MAGIC);
-        assertEquals(1, Protocol.VERSION);
+        assertEquals(2, Protocol.VERSION);
         assertEquals(1024, Protocol.CMD_MAX_LEN);
         assertEquals(8 * 1024 * 1024, Protocol.IMG_MAX_LEN);
         assertEquals(8192, Protocol.MAX_SCREEN_DIM);
@@ -78,7 +78,7 @@ class PacketTest {
 
     @Test
     void authVersionMismatchIsDecodedNotRejected() {
-        assertEquals(7, Packet.auth(7, "000000").authPayload().version());
+        assertEquals(1, Packet.auth(1, "000000").authPayload().version());
     }
 
     @Test

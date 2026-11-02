@@ -4,11 +4,11 @@ import static com.ltm.rd.ui.RuntimeTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.ltm.rd.client.ClientSession;
+import com.ltm.rd.common.FakeClock;
+import com.ltm.rd.common.Packet;
 import com.ltm.rd.host.FakeInputDevice;
 import com.ltm.rd.host.FakeScreenSource;
 import com.ltm.rd.host.InputExecutor;
-import com.ltm.rd.common.FakeClock;
-import com.ltm.rd.common.Packet;
 import com.ltm.rd.server.ServerSession;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -68,34 +68,33 @@ class AppRuntimeEndToEndTest {
         final int idleServerTickers;
 
         Rig(LongSupplier serverClock) throws Exception {
-            server = AppRuntime.forServer(serverConfig(serverClock, 0, 0));
-            runtimes.add(server);
-            get(server.startServer());
-            idleServerTickers = server.tickerRegistrations();
-            Snapshot listening = server.snapshot();
-            client = AppRuntime.forClient(clientConfig(listening.cmdPort(), listening.imgPort(), System::nanoTime),
-                    adapters);
+            client = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), adapters);
             runtimes.add(client);
+            get(client.startHost());
+            idleServerTickers = client.tickerRegistrations();
+            Snapshot listening = client.snapshot();
+            server = AppRuntime.forViewer(clientConfig(listening.cmdPort(), listening.imgPort(), serverClock));
+            runtimes.add(server);
             connect();
         }
 
         /** (Re)connects the Client and waits until the Server may send input. */
         Snapshot connect() {
-            assertEquals(ConnectOutcome.STARTED, client.connect("127.0.0.1", server.snapshot().code()));
+            assertEquals(ConnectOutcome.STARTED, server.connect("127.0.0.1", client.snapshot().code()));
             return await(server, s -> s.controlEnabled());
         }
 
         /** Disconnects and waits until both sides are idle again. */
         void disconnect() throws Exception {
-            ClientSession cs = client.clientSession().orElseThrow();
-            assertTrue(client.disconnect());
+            ClientSession cs = server.clientSession().orElseThrow();
+            assertTrue(server.disconnect());
             get(cs.terminated());
             get(cs.inputReleased());
-            await(server, s -> s.phase() == UiPhase.LISTENING);
-            await(client, s -> s.phase() == UiPhase.IDLE);
-            awaitTrue("client ticker registrations back to 0", () -> client.tickerRegistrations() == 0);
+            await(client, s -> s.phase() == UiPhase.LISTENING);
+            await(server, s -> s.phase() == UiPhase.IDLE);
+            awaitTrue("client ticker registrations back to 0", () -> server.tickerRegistrations() == 0);
             awaitTrue("server ticker registrations back to idle",
-                    () -> server.tickerRegistrations() == idleServerTickers);
+                    () -> client.tickerRegistrations() == idleServerTickers);
             awaitNoSessionThreads(baseline);
         }
 
@@ -112,7 +111,7 @@ class AppRuntimeEndToEndTest {
     // ---- input -----------------------------------------------------------------------------
 
     @Test
-    void serverInputReachesClientDeviceAfterFirstFrame() throws Exception {
+    void viewerInputReachesHostDeviceAfterFirstFrame() throws Exception {
         Rig rig = new Rig(System::nanoTime);
         Snapshot s = rig.server.snapshot();
         assertTrue(s.controlEnabled());
@@ -172,12 +171,12 @@ class AppRuntimeEndToEndTest {
         await(rig.server, x -> !x.controlEnabled());
 
         assertTrue(rig.server.releaseControlInput(s.generation()), "RELEASE_ALL goes out although the gate is closed");
-        ClientSession cs = rig.client.clientSession().orElseThrow();
+        com.ltm.rd.server.ServerSession cs = rig.client.serverCore().sessions().current().orElseThrow();
         awaitTrue("two RELEASE_ALL received", () -> cs.releaseAllReceived() >= 2);
         assertEquals(2, cs.releaseAllReceived(), "one for the stall, one for the lost focus");
         assertTrue(device.awaitCall("keyRelease:17"));
         assertEquals(1, device.log().stream().filter("keyRelease:17"::equals).count());
-        assertEquals(1, rig.server.serverCore().sessions().current().orElseThrow().controlReleasesSent());
+        assertEquals(1, rig.server.clientSession().orElseThrow().controlReleasesSent());
         assertFalse(rig.server.releaseControlInput(s.generation() + 1), "another generation is never released");
         unblock.countDown();
     }
@@ -190,9 +189,9 @@ class AppRuntimeEndToEndTest {
 
     @Test
     void shutdownAsyncReturnsSameFutureWhenRepeated() throws Exception {
-        AppRuntime rt = AppRuntime.forServer(serverConfig(System::nanoTime, 0, 0));
+        AppRuntime rt = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), new FakeAdapterFactory());
         runtimes.add(rt);
-        get(rt.startServer());
+        get(rt.startHost());
         CompletableFuture<ShutdownReport> first = rt.shutdownAsync();
         CompletableFuture<ShutdownReport> second = rt.shutdownAsync();
         assertSame(first, second);
@@ -215,7 +214,8 @@ class AppRuntimeEndToEndTest {
         CompletableFuture<ShutdownReport> shutdown = rig.client.shutdownAsync();
         assertTrue(releaseGate.awaitEntered());
         assertFalse(shutdown.isDone());
-        assertEquals(ConnectOutcome.SHUTTING_DOWN, rig.client.connect("127.0.0.1", "123456"));
+        assertFalse(rig.client.regenerateCode());
+        assertThrows(ExecutionException.class, () -> get(rig.client.startHost()));
         assertEquals(UiPhase.SHUTTING_DOWN, rig.client.snapshot().phase());
         releaseGate.open();
         assertEquals(InputRelease.RELEASED, get(shutdown).inputRelease());
@@ -224,22 +224,21 @@ class AppRuntimeEndToEndTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch go = new CountDownLatch(1);
         gates.add(go);
-        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.client.ClientHooks.none(),
-                com.ltm.rd.client.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
+        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.client.ClientHooks.none(), com.ltm.rd.client.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
                     entered.countDown();
                     try {
                         go.await();
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                     }
-                }, () -> { });
-        AppRuntime parked = AppRuntime.forServer(serverConfig(System::nanoTime, 0, 0), seams);
+                }, () -> { }, () -> { });
+        AppRuntime parked = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), new FakeAdapterFactory(), seams);
         runtimes.add(parked);
-        CompletableFuture<Void> start = parked.startServer();
+        CompletableFuture<Void> start = parked.startHost();
         assertTrue(entered.await(WAIT_S, TimeUnit.SECONDS));
         CompletableFuture<ShutdownReport> parkedShutdown = parked.shutdownAsync();
         assertFalse(parkedShutdown.isDone());
-        ExecutionException e = assertThrows(ExecutionException.class, () -> get(parked.startServer()));
+        ExecutionException e = assertThrows(ExecutionException.class, () -> get(parked.startHost()));
         assertInstanceOf(IllegalStateException.class, e.getCause());
         assertEquals(UiPhase.SHUTTING_DOWN, parked.snapshot().phase());
         go.countDown();
@@ -277,8 +276,7 @@ class AppRuntimeEndToEndTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch go = new CountDownLatch(1);
         gates.add(go);
-        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.client.ClientHooks.none(),
-                com.ltm.rd.client.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
+        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.client.ClientHooks.none(), com.ltm.rd.client.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
                     entered.countDown();
                     boolean interrupted = false; // a stuck task: interrupts do not release it
                     while (go.getCount() > 0) {
@@ -289,10 +287,10 @@ class AppRuntimeEndToEndTest {
                         }
                     }
                     if (interrupted) Thread.currentThread().interrupt();
-                }, () -> { });
-        AppRuntime stuck = AppRuntime.forServer(serverConfig(System::nanoTime, 0, 0, Duration.ofMillis(300)), seams);
+                }, () -> { }, () -> { });
+        AppRuntime stuck = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0, Duration.ofMillis(300)), new FakeAdapterFactory(), seams);
         runtimes.add(stuck);
-        stuck.startServer();
+        stuck.startHost();
         assertTrue(entered.await(WAIT_S, TimeUnit.SECONDS));
 
         ShutdownReport report = get(stuck.shutdownAsync());

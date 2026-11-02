@@ -1,25 +1,36 @@
 package com.ltm.rd.ui;
 
 /** What the Server window enables and says for a snapshot; pure, so it is tested without a window. */
-public record ServerFormState(boolean regenerateEnabled, boolean disconnectEnabled, boolean controlWindowVisible,
-        String statusText) {
-    static final String WAITING_RELEASE = "Đang chờ nhả phím/nút trên máy này…";
+public record ServerFormState(boolean regenerateEnabled, boolean disconnectEnabled, boolean sharingBarVisible,
+        boolean retryEnabled, String statusText) {
+    static final String WAITING_RELEASE = "Đang nhả phím/chuột của phiên trước…";
 
     public static ServerFormState of(Snapshot s, boolean closingWarning) {
         UiPhase p = s.phase();
         String status = switch (p) {
-            case IDLE -> withReason(s, "Chưa khởi động máy chủ.");
-            case STARTING -> "Đang khởi động máy chủ…";
-            case LISTENING -> withReason(s, "Đang chờ máy được điều khiển kết nối.");
-            case RESERVED -> "Một máy đang kết nối…";
-            case ACTIVE -> "Đang điều khiển " + s.peer();
-            case CLOSING -> closingWarning ? WAITING_RELEASE : withReason(s, "Đang đóng phiên…");
-            case FAILED -> s.message().isEmpty() ? "Máy chủ gặp lỗi." : s.message();
+            case IDLE -> withReason(s, "Chưa khởi động Host.");
+            case STARTING -> "Đang khởi động Host…";
+            case LISTENING -> withReason(s, "Đang chờ Viewer kết nối.");
+            case RESERVED -> "Viewer đang kết nối; đang chuẩn bị chia sẻ…";
+            case ACTIVE -> "Đang được điều khiển bởi " + s.peer();
+            case CLOSING -> "Đang dọn phiên trước…";
+            case FAILED -> s.message().isEmpty() ? "Host gặp lỗi." : s.message();
             case SHUTTING_DOWN -> "Ứng dụng đang đóng.";
             case CONNECTING, AUTHENTICATING, ATTACHING -> "Đang kết nối…"; // Client phases, never on the Server
         };
-        return new ServerFormState(p == UiPhase.LISTENING, p == UiPhase.RESERVED || p == UiPhase.ACTIVE,
-                p == UiPhase.ACTIVE, status);
+        if (p != UiPhase.SHUTTING_DOWN) {
+            status = switch (s.cleanup()) {
+                case NONE -> status;
+                case WORKERS -> "Đang dọn phiên trước…";
+                case INPUT_PENDING -> WAITING_RELEASE;
+                case INPUT_FAILED -> Messages.INPUT_RELEASE_FAILED;
+                case INPUT_FAULTED -> Messages.INPUT_FAULTED;
+            };
+        }
+        boolean ready = s.cleanup() == Snapshot.Cleanup.NONE;
+        return new ServerFormState(ready && p == UiPhase.LISTENING,
+                ready && (p == UiPhase.RESERVED || p == UiPhase.ACTIVE), ready && p == UiPhase.ACTIVE,
+                ready && (p == UiPhase.IDLE || p == UiPhase.FAILED), status);
     }
 
     private static String withReason(Snapshot s, String base) {

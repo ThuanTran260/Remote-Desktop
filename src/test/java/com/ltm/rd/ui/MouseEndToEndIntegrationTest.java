@@ -3,10 +3,10 @@ package com.ltm.rd.ui;
 import static com.ltm.rd.ui.RuntimeTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.host.FakeInputDevice;
-import com.ltm.rd.host.FakeScreenSource;
 import com.ltm.rd.common.FakeClock;
 import com.ltm.rd.common.Packet;
+import com.ltm.rd.host.FakeInputDevice;
+import com.ltm.rd.host.FakeScreenSource;
 import java.awt.event.InputEvent;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
@@ -57,13 +57,12 @@ class MouseEndToEndIntegrationTest {
         final InputCapture capture;
 
         Rig(LongSupplier serverClock) throws Exception {
-            server = AppRuntime.forServer(serverConfig(serverClock, 0, 0));
-            runtimes.add(server);
-            get(server.startServer());
-            Snapshot listening = server.snapshot();
-            client = AppRuntime.forClient(clientConfig(listening.cmdPort(), listening.imgPort(), System::nanoTime),
-                    adapters);
+            client = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), adapters);
             runtimes.add(client);
+            get(client.startHost());
+            Snapshot listening = client.snapshot();
+            server = AppRuntime.forViewer(clientConfig(listening.cmdPort(), listening.imgPort(), serverClock));
+            runtimes.add(server);
             sink = new FakeController(server);
             panel.setSize(960, 540);
             capture = new InputCapture(sink, panel, () -> true, () -> { });
@@ -72,7 +71,7 @@ class MouseEndToEndIntegrationTest {
 
         /** (Re)connects the Client and applies the first controllable snapshot to the panel. */
         void connect() throws Exception {
-            assertEquals(ConnectOutcome.STARTED, client.connect("127.0.0.1", server.snapshot().code()));
+            assertEquals(ConnectOutcome.STARTED, server.connect("127.0.0.1", client.snapshot().code()));
             await(server, s -> s.controlEnabled());
             refresh();
         }

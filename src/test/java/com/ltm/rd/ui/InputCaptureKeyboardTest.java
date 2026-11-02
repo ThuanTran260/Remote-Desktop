@@ -37,9 +37,9 @@ class InputCaptureKeyboardTest {
 
         void apply(boolean controlEnabled) throws Exception {
             edt(() -> {
-                panel.apply(new Snapshot(LaunchOptions.Role.SERVER, UiPhase.ACTIVE, 7, 3, "", "10.0.0.2", 5001, 5000,
+                panel.apply(new Snapshot(LaunchOptions.Role.VIEWER, UiPhase.ACTIVE, 7, 3, "", "10.0.0.2", 5001, 5000,
                         "123456", 1920, 1080, new BufferedImage(4, 4, BufferedImage.TYPE_INT_RGB), 1, controlEnabled,
-                        TrafficStats.ZERO));
+                        TrafficStats.ZERO, Snapshot.Cleanup.NONE));
                 PaintSupport.paintNow(panel); // the gate opens only once the frame is painted
                 capture.onApplied(7, 3);
             });

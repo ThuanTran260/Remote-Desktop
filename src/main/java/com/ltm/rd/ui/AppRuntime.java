@@ -1,16 +1,10 @@
 package com.ltm.rd.ui;
 
 import com.ltm.rd.LaunchOptions;
-import com.ltm.rd.host.AdapterException;
-import com.ltm.rd.host.AdapterFactory;
 import com.ltm.rd.client.ClientConfig;
 import com.ltm.rd.client.ClientHooks;
 import com.ltm.rd.client.ClientPhase;
 import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.host.InputDevice;
-import com.ltm.rd.host.InputExecutor;
-import com.ltm.rd.host.ScreenGeometry;
-import com.ltm.rd.host.ScreenSource;
 import com.ltm.rd.client.SocketConnector;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.CommandWriter;
@@ -18,12 +12,17 @@ import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.Ticker;
 import com.ltm.rd.common.TrafficSnapshot;
-import com.ltm.rd.viewer.ControlView;
-import com.ltm.rd.viewer.InputOutcome;
+import com.ltm.rd.host.AdapterException;
+import com.ltm.rd.host.AdapterFactory;
+import com.ltm.rd.host.InputDevice;
+import com.ltm.rd.host.InputExecutor;
+import com.ltm.rd.host.ScreenGeometry;
 import com.ltm.rd.server.ServerConfig;
 import com.ltm.rd.server.ServerCore;
 import com.ltm.rd.server.ServerPhase;
 import com.ltm.rd.server.ServerSession;
+import com.ltm.rd.viewer.ControlView;
+import com.ltm.rd.viewer.InputOutcome;
 import java.awt.Rectangle;
 import java.io.OutputStream;
 import java.security.SecureRandom;
@@ -62,18 +61,19 @@ public final class AppRuntime implements Controller {
 
     /** Test seams; {@link #none()} in production. */
     record Seams(ClientHooks hooks, SocketConnector connector, UnaryOperator<OutputStream> imageOutputDecorator,
-            Runnable beforeServerStart, Runnable afterServerStart) {
+            Runnable beforeServerStart, Runnable afterServerStart, Runnable beforeSenderStart) {
         Seams {
             Objects.requireNonNull(hooks);
             Objects.requireNonNull(connector);
             Objects.requireNonNull(imageOutputDecorator);
             Objects.requireNonNull(beforeServerStart);
             Objects.requireNonNull(afterServerStart);
+            Objects.requireNonNull(beforeSenderStart);
         }
 
         static Seams none() {
             return new Seams(ClientHooks.none(), SocketConnector.DEFAULT, UnaryOperator.identity(), () -> { },
-                    () -> { });
+                    () -> { }, () -> { });
         }
     }
 
@@ -83,13 +83,10 @@ public final class AppRuntime implements Controller {
     private static final class ClientSlot {
         final long generation;
         final String host;
-        ClientSession session; // null while the adapters are prepared
+        ClientSession session; // null until the queued connect attempt is constructed
         boolean cancelled;
-        boolean ended; // no session will ever exist for this slot (adapter failure or cancelled early)
-        boolean faultClosed; // the runtime closed the session because the input device faulted
+        boolean ended; // no session will ever exist for this slot (startup failure or cancelled early)
         String failure = "";
-        int screenWidth;
-        int screenHeight;
 
         ClientSlot(long generation, String host) {
             this.generation = generation;
@@ -97,30 +94,30 @@ public final class AppRuntime implements Controller {
         }
 
         SlotView view() {
-            return new SlotView(generation, host, session, cancelled, ended, failure, screenWidth, screenHeight,
-                    faultClosed);
+            return new SlotView(generation, host, session, cancelled, ended, failure);
         }
     }
 
     private record SlotView(long generation, String host, ClientSession session, boolean cancelled, boolean ended,
-            String failure, int screenWidth, int screenHeight, boolean faultClosed) {}
+            String failure) {}
 
     private final LaunchOptions.Role role;
     private final AppConfig cfg;
     private final Seams seams;
-    private final AdapterFactory adapters; // null for the Server
+    private final AdapterFactory adapters; // null for the Viewer
     private final Object lock = new Object();
     private final ExecutorService app = Executors.newSingleThreadExecutor(daemonFactory("rd-app", false));
     private final AtomicBoolean shuttingDown = new AtomicBoolean();
     private final CompletableFuture<ShutdownReport> shutdownFuture = new CompletableFuture<>();
 
-    // Client resources; null for the Server
+    // Viewer connection resources; null for the Host. The Host owns inputExecutor instead.
     private final Ticker ticker;
     private final ScheduledExecutorService scheduler;
     private final ExecutorService cleanup;
     private final InputExecutor inputExecutor;
     private volatile Throwable lastInputFault;
-    private volatile ScreenSource currentScreen;
+    private volatile ScreenGeometry boundsSnapshot;
+    private volatile ServerSession faultClosedSession;
 
     // guarded by lock
     private long generationCounter;
@@ -128,7 +125,8 @@ public final class AppRuntime implements Controller {
     private ServerCore core;
     private ServerState serverState = ServerState.IDLE;
     private String serverMessage = "";
-    private ServerSession observedSession; // the newest server session a snapshot has seen
+    private ServerSession observedSession; // the newest Host session observed at reservation
+    private long observedGeneration;
 
     private AppRuntime(LaunchOptions.Role role, AppConfig cfg, AdapterFactory adapters, Seams seams)
             throws AdapterException {
@@ -136,53 +134,49 @@ public final class AppRuntime implements Controller {
         this.cfg = Objects.requireNonNull(cfg);
         this.seams = Objects.requireNonNull(seams);
         this.adapters = adapters;
-        if (role == LaunchOptions.Role.CLIENT) {
-            InputDevice device = adapters.inputDevice(); // before any thread exists: a failure leaves nothing behind
-            Ticker t = new Ticker(cfg.timeouts().tick(), cfg.nanoClock());
-            ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor(daemonFactory("rd-close-timer", false));
-            ExecutorService clean = Executors.newCachedThreadPool(daemonFactory("rd-cleanup-", true));
-            InputExecutor executor;
-            try {
-                executor = new InputExecutor(device, this::currentBounds, INPUT_CAPACITY,
-                        InputExecutor.defaultThreadFactory(), this::onInputFault);
-            } catch (RuntimeException e) {
-                t.close();
-                sched.shutdownNow();
-                clean.shutdownNow();
-                throw e;
-            }
-            this.ticker = t;
-            this.scheduler = sched;
-            this.cleanup = clean;
-            this.inputExecutor = executor;
-        } else {
+        if (role == LaunchOptions.Role.HOST) {
+            InputDevice device = Objects.requireNonNull(adapters).inputDevice();
+            this.inputExecutor = new InputExecutor(device, this::currentBounds, INPUT_CAPACITY,
+                    InputExecutor.defaultThreadFactory(), this::onInputFault);
             this.ticker = null;
             this.scheduler = null;
             this.cleanup = null;
+        } else {
             this.inputExecutor = null;
+            Ticker createdTicker = new Ticker(cfg.timeouts().tick(), cfg.nanoClock());
+            ScheduledExecutorService createdScheduler = null;
+            ExecutorService createdCleanup = null;
+            try {
+                createdScheduler = Executors.newSingleThreadScheduledExecutor(daemonFactory("rd-close-timer", false));
+                createdCleanup = Executors.newCachedThreadPool(daemonFactory("rd-cleanup-", true));
+            } catch (RuntimeException failure) {
+                createdTicker.close();
+                if (createdScheduler != null) createdScheduler.shutdownNow();
+                if (createdCleanup != null) createdCleanup.shutdownNow();
+                throw failure;
+            }
+            this.ticker = createdTicker;
+            this.scheduler = createdScheduler;
+            this.cleanup = createdCleanup;
         }
     }
 
-    /** A Server runtime; performs no I/O until {@link #startServer()}. */
-    public static AppRuntime forServer(AppConfig cfg) {
-        return forServer(cfg, Seams.none());
+    public static AppRuntime forHost(AppConfig cfg, AdapterFactory adapters) throws AdapterException {
+        return forHost(cfg, adapters, Seams.none());
     }
 
-    static AppRuntime forServer(AppConfig cfg, Seams seams) {
+    static AppRuntime forHost(AppConfig cfg, AdapterFactory adapters, Seams seams) throws AdapterException {
+        return new AppRuntime(LaunchOptions.Role.HOST, cfg, Objects.requireNonNull(adapters), seams);
+    }
+
+    public static AppRuntime forViewer(AppConfig cfg) { return forViewer(cfg, Seams.none()); }
+
+    static AppRuntime forViewer(AppConfig cfg, Seams seams) {
         try {
-            return new AppRuntime(LaunchOptions.Role.SERVER, cfg, null, seams);
-        } catch (AdapterException e) {
-            throw new IllegalStateException(e); // a Server asks no adapter
+            return new AppRuntime(LaunchOptions.Role.VIEWER, cfg, null, seams);
+        } catch (AdapterException impossible) {
+            throw new IllegalStateException(impossible);
         }
-    }
-
-    /** A Client runtime; fails with {@link AdapterException} before any thread was started. */
-    public static AppRuntime forClient(AppConfig cfg, AdapterFactory adapters) throws AdapterException {
-        return forClient(cfg, adapters, Seams.none());
-    }
-
-    static AppRuntime forClient(AppConfig cfg, AdapterFactory adapters, Seams seams) throws AdapterException {
-        return new AppRuntime(LaunchOptions.Role.CLIENT, cfg, Objects.requireNonNull(adapters), seams);
     }
 
     public LaunchOptions.Role role() {
@@ -193,7 +187,7 @@ public final class AppRuntime implements Controller {
 
     /** Live ticker registrations: the Client runtime's own ticker or the running ServerCore's. */
     int tickerRegistrations() {
-        if (role == LaunchOptions.Role.CLIENT) return ticker.registrations();
+        if (role == LaunchOptions.Role.VIEWER) return ticker.registrations();
         ServerCore c;
         synchronized (lock) {
             c = core;
@@ -220,10 +214,11 @@ public final class AppRuntime implements Controller {
     // ---- Server --------------------------------------------------------------------------------
 
     @Override
-    public CompletableFuture<Void> startServer() {
-        if (role != LaunchOptions.Role.SERVER) {
+    public CompletableFuture<Void> startHost() {
+        if (role != LaunchOptions.Role.HOST) {
             return CompletableFuture.failedFuture(new IllegalStateException("not a server runtime"));
         }
+        if (inputFaulted()) return CompletableFuture.failedFuture(new IllegalStateException("input unavailable"));
         boolean accepted;
         synchronized (lock) {
             accepted = !shuttingDown.get() && (serverState == ServerState.IDLE || serverState == ServerState.FAILED);
@@ -249,7 +244,8 @@ public final class AppRuntime implements Controller {
         ServerCore c = null;
         try {
             c = new ServerCore(new ServerConfig(cfg.bindAddress(), cfg.cmdPort(), cfg.imgPort(), cfg.timeouts(),
-                    cfg.nanoClock(), new SecureRandom()));
+                    cfg.nanoClock(), new SecureRandom(), seams.imageOutputDecorator()), inputExecutor, adapters,
+                    this::publishBounds, seams.beforeSenderStart(), this::observeSession);
             boolean proceed;
             synchronized (lock) {
                 proceed = !shuttingDown.get();
@@ -281,12 +277,12 @@ public final class AppRuntime implements Controller {
     @Override
     public boolean regenerateCode() {
         ServerCore c = startedCore();
-        return c != null && c.sessions().regenerateCode();
+        return !inputFaulted() && c != null && c.sessions().regenerateCode();
     }
 
     /** The running core, or null when this is not a started Server or it is shutting down. */
     private ServerCore startedCore() {
-        if (role != LaunchOptions.Role.SERVER || shuttingDown.get()) return null;
+        if (role != LaunchOptions.Role.HOST || shuttingDown.get()) return null;
         synchronized (lock) {
             return serverState == ServerState.STARTED ? core : null;
         }
@@ -294,15 +290,12 @@ public final class AppRuntime implements Controller {
 
     @Override
     public SendResult sendInput(long generation, long inputEpoch, Packet inputPacket) {
-        if (role != LaunchOptions.Role.SERVER) return SendResult.WRONG_ROLE;
+        if (role != LaunchOptions.Role.VIEWER) return SendResult.WRONG_ROLE;
         if (shuttingDown.get()) return SendResult.SHUTTING_DOWN;
-        ServerCore c = startedCore();
-        if (c == null) return SendResult.NO_SESSION;
-        ServerSession session = c.sessions().current().orElse(null); // read once: the object decides, not a lookup
+        ClientSession session = clientSession().orElse(null);
         if (session == null) return SendResult.NO_SESSION;
         if (session.generation() != generation) return SendResult.STALE_GENERATION;
-        InputOutcome outcome = session.offerInput(inputEpoch, inputPacket);
-        return switch (outcome) {
+        return switch (session.offerInput(inputEpoch, inputPacket)) {
             case SENT -> SendResult.SENT;
             case GATE_CLOSED -> SendResult.GATE_CLOSED;
             case STALE_EPOCH -> SendResult.STALE_EPOCH;
@@ -312,9 +305,8 @@ public final class AppRuntime implements Controller {
 
     @Override
     public boolean releaseControlInput(long generation) {
-        ServerCore c = startedCore();
-        if (c == null) return false;
-        ServerSession session = c.sessions().current().orElse(null);
+        if (role != LaunchOptions.Role.VIEWER || shuttingDown.get()) return false;
+        ClientSession session = clientSession().orElse(null);
         return session != null && session.generation() == generation
                 && session.releaseControlInput() == CommandWriter.OfferResult.ACCEPTED;
     }
@@ -323,12 +315,11 @@ public final class AppRuntime implements Controller {
 
     @Override
     public ConnectOutcome connect(String host, String code) {
-        if (role != LaunchOptions.Role.CLIENT) return ConnectOutcome.WRONG_ROLE;
+        if (role != LaunchOptions.Role.VIEWER) return ConnectOutcome.WRONG_ROLE;
         if (shuttingDown.get()) return ConnectOutcome.SHUTTING_DOWN;
         String cleanHost = host == null ? "" : host.trim();
         if (cleanHost.isEmpty() || code == null || !CODE.matcher(code).matches()) return ConnectOutcome.INVALID_INPUT;
         while (true) {
-            if (inputFaulted()) return ConnectOutcome.INPUT_FAULTED;
             SlotView seen;
             synchronized (lock) {
                 seen = slot == null ? null : slot.view();
@@ -361,47 +352,35 @@ public final class AppRuntime implements Controller {
         if (v == null || v.ended()) return null;
         ClientSession cs = v.session();
         if (cs == null || !cs.lifecycle().isClosed()) return ConnectOutcome.BUSY;
-        CompletableFuture<Void> released = cs.inputReleased();
-        if (released.isCompletedExceptionally()) return ConnectOutcome.INPUT_FAULTED;
-        if (!(cs.terminated().isDone() && released.isDone())) return ConnectOutcome.WAITING_RELEASE;
+        if (!(cs.socketsClosed().isDone() && cs.terminated().isDone())) return ConnectOutcome.BUSY;
         return null;
     }
 
     private boolean inputFaulted() {
-        return lastInputFault != null || inputExecutor.state() == InputExecutor.State.FAULTED;
+        return lastInputFault != null || (inputExecutor != null && inputExecutor.state() == InputExecutor.State.FAULTED);
     }
 
-    /** Body on {@code rd-app}: adapters first, then the session; the session is started outside the lock. */
     private void prepareAndStart(ClientSlot s, String host, String code) {
         try {
             if (abandoned(s)) {
                 endCancelled(s);
                 return;
             }
-            adapters.refreshInputDevice();
-            ScreenSource source = adapters.newScreenSource();
-            ScreenGeometry geometry = source.geometry();
-            currentScreen = source;
-            ClientConfig clientCfg = new ClientConfig(host, cfg.cmdPort(), cfg.imgPort(), code, cfg.timeouts(),
-                    cfg.nanoClock(), seams.imageOutputDecorator());
-            ClientSession session = new ClientSession(clientCfg, s.generation, inputExecutor, source,
-                    seams.connector(), seams.hooks(), ticker, scheduler, cleanup);
+            ClientConfig clientCfg = new ClientConfig(host, cfg.cmdPort(), cfg.imgPort(), code, cfg.timeouts(), cfg.nanoClock());
+            ClientSession session = new ClientSession(clientCfg, s.generation, seams.connector(), seams.hooks(),
+                    ticker, scheduler, cleanup);
             boolean start;
             synchronized (lock) {
                 start = !s.cancelled && !shuttingDown.get();
-                if (start) {
-                    s.session = session;
-                    s.screenWidth = geometry.bounds().width;
-                    s.screenHeight = geometry.bounds().height;
-                }
+                if (start) s.session = session;
             }
-            if (start) {
-                session.start();
-            } else {
+            if (start) session.start();
+            else {
+                session.cancel();
                 endCancelled(s);
             }
-        } catch (Throwable e) { // AdapterException or anything unexpected: the slot ends, the app stays usable
-            LOG.log(System.Logger.Level.WARNING, "connect preparation failed: " + e.getClass().getSimpleName());
+        } catch (Throwable e) {
+            LOG.log(System.Logger.Level.WARNING, "connect startup failed: " + e.getClass().getSimpleName());
             endSlot(s, Messages.forThrowable(e));
         }
     }
@@ -425,11 +404,11 @@ public final class AppRuntime implements Controller {
 
     @Override
     public boolean cancel() {
-        if (role != LaunchOptions.Role.CLIENT) return false;
+        if (role != LaunchOptions.Role.VIEWER) return false;
         ClientSession cs;
         synchronized (lock) {
             if (slot == null || slot.ended) return false;
-            if (slot.session == null) { // still preparing: rd-app will see the flag and create nothing
+            if (slot.session == null) { // still queued: rd-app will see the flag and create nothing
                 if (slot.cancelled) return false;
                 slot.cancelled = true;
                 return true;
@@ -449,14 +428,12 @@ public final class AppRuntime implements Controller {
     @Override
     public boolean disconnect() {
         if (shuttingDown.get()) return false;
-        if (role == LaunchOptions.Role.SERVER) {
+        if (role == LaunchOptions.Role.HOST) {
             ServerCore c = startedCore();
             ServerSession session = c == null ? null : c.sessions().current().orElse(null);
             if (session == null || session.closeInfo().isPresent()) return false;
             session.disconnect();
-            synchronized (lock) {
-                serverMessage = Messages.forClose(Packet.DisconnectReason.USER);
-            }
+            rememberServerMessage(session, Messages.forClose(Packet.DisconnectReason.USER));
             return true;
         }
         ClientSession cs;
@@ -481,13 +458,13 @@ public final class AppRuntime implements Controller {
         if (shuttingDown.get()) {
             return blank(UiPhase.SHUTTING_DOWN, Messages.forClose(Packet.DisconnectReason.SHUTDOWN));
         }
-        return role == LaunchOptions.Role.SERVER ? serverSnapshot() : clientSnapshot();
+        return role == LaunchOptions.Role.HOST ? serverSnapshot() : clientSnapshot();
     }
 
     /** A snapshot without a session: the configured ports, nothing else. */
     private Snapshot blank(UiPhase phase, String message) {
         return new Snapshot(role, phase, 0, 0, message, null, cfg.cmdPort(), cfg.imgPort(), null, 0, 0, null, 0,
-                false, TrafficStats.ZERO);
+                false, TrafficStats.ZERO, Snapshot.Cleanup.NONE);
     }
 
     private Snapshot serverSnapshot() {
@@ -524,100 +501,88 @@ public final class AppRuntime implements Controller {
         }
         if (session == null) {
             return new Snapshot(role, UiPhase.LISTENING, 0, 0, message, null, cmdPort, imgPort, code, 0, 0, null, 0,
-                    false, TrafficStats.ZERO);
+                    false, TrafficStats.ZERO, Snapshot.Cleanup.NONE);
         }
-        watchClose(session);
-        ControlView view = session.controlView();
         Optional<CloseInfo> closed = session.closeInfo();
-        UiPhase phase;
-        String shownMessage;
-        if (closed.isPresent() || view.phase() == ServerPhase.CLOSING) {
-            phase = UiPhase.CLOSING;
-            shownMessage = closed.map(i -> Messages.forClose(i.reason())).orElse("");
-            code = null;
-            rememberServerMessage(shownMessage);
-        } else {
-            phase = view.phase() == ServerPhase.ACTIVE ? UiPhase.ACTIVE : UiPhase.RESERVED;
-            shownMessage = "";
-            rememberServerMessage("");
+        UiPhase phase = closed.isPresent() || session.phase() == ServerPhase.CLOSING ? UiPhase.CLOSING
+                : session.phase() == ServerPhase.ACTIVE ? UiPhase.ACTIVE : UiPhase.RESERVED;
+        String shownMessage = closed.map(i -> Messages.forClose(i.reason())).orElse("");
+        Snapshot.Cleanup pending = Snapshot.Cleanup.NONE;
+        if (closed.isPresent()) {
+            if (faultClosedSession == session) pending = Snapshot.Cleanup.INPUT_FAULTED;
+            else if (session.inputReleased().isCompletedExceptionally()) pending = Snapshot.Cleanup.INPUT_FAILED;
+            else if (!session.inputReleased().isDone()) pending = Snapshot.Cleanup.INPUT_PENDING;
+            else if (!session.terminated().isDone()) pending = Snapshot.Cleanup.WORKERS;
         }
+        if (pending == Snapshot.Cleanup.INPUT_FAILED) shownMessage = Messages.INPUT_RELEASE_FAILED;
+        else if (pending == Snapshot.Cleanup.INPUT_FAULTED) shownMessage = Messages.INPUT_FAULTED;
+        else if (session.preparationFailure().isPresent()) shownMessage = Messages.forThrowable(session.preparationFailure().orElseThrow());
+        rememberServerMessage(session, shownMessage);
         Optional<Packet.SizePayload> screen = session.screen();
-        TrafficSnapshot t = session.traffic();
-        OptionalLong rtt = session.rttNanos();
-        return new Snapshot(role, phase, view.generation(), view.inputEpoch(), shownMessage,
-                session.peer().getHostAddress(), cmdPort, imgPort, code, screen.map(Packet.SizePayload::width).orElse(0),
-                screen.map(Packet.SizePayload::height).orElse(0), view.frame(), view.framesReceived(),
-                view.controlEnabled(), stats(t, rtt));
+        return new Snapshot(role, phase, session.generation(), 0, shownMessage,
+                session.peer().getHostAddress(), cmdPort, imgPort, null,
+                screen.map(Packet.SizePayload::width).orElse(0), screen.map(Packet.SizePayload::height).orElse(0),
+                null, session.framesSent(), false, stats(session.traffic(), session.rttNanos()), pending);
     }
 
     /**
      * Remembers why a session ended even if it is gone between two snapshots: the message is recorded
      * when its sockets are closed, as long as no newer session has been seen since.
      */
-    private void watchClose(ServerSession session) {
-        boolean fresh;
+    private void observeSession(ServerSession session) {
+        long generation = session.generation();
         synchronized (lock) {
-            fresh = observedSession != session;
-            if (fresh) observedSession = session;
+            if (generation <= observedGeneration) return;
+            observedSession = session;
+            observedGeneration = generation;
+            serverMessage = "";
         }
-        if (!fresh) return;
         session.socketsClosed().thenAccept(info -> {
+            String normalized = Messages.forClose(info.reason());
+            Optional<Throwable> failure = session.preparationFailure();
+            if (info.reason() == Packet.DisconnectReason.PROTOCOL_ERROR
+                    && info.message().equals("host screen unavailable") && failure.isPresent()) {
+                normalized = Messages.forThrowable(failure.orElseThrow());
+            }
             synchronized (lock) {
-                if (observedSession == session && serverState == ServerState.STARTED) {
-                    serverMessage = Messages.forClose(info.reason());
+                if (observedSession == session && observedGeneration == generation && serverState == ServerState.STARTED) {
+                    serverMessage = normalized;
                 }
             }
         });
     }
 
-    private void rememberServerMessage(String message) {
+    private void rememberServerMessage(ServerSession session, String message) {
+        long generation = session.generation();
         synchronized (lock) {
-            if (serverState == ServerState.STARTED) serverMessage = message;
+            if (serverState == ServerState.STARTED && observedSession == session && observedGeneration == generation) {
+                serverMessage = message;
+            }
         }
     }
 
     private Snapshot clientSnapshot() {
         SlotView v;
-        synchronized (lock) {
-            v = slot == null ? null : slot.view();
-        }
-        if (v == null || v.ended()) {
-            if (inputFaulted()) return blank(UiPhase.FAILED, Messages.INPUT_RELEASE_FAILED);
-            return blank(UiPhase.IDLE, v == null ? "" : v.failure());
-        }
+        synchronized (lock) { v = slot == null ? null : slot.view(); }
+        if (v == null || v.ended()) return blank(UiPhase.IDLE, v == null ? "" : v.failure());
         ClientSession cs = v.session();
-        if (cs == null) { // adapters are being prepared
-            return clientSnapshot(UiPhase.CONNECTING, v, "", TrafficSnapshot.ZERO, OptionalLong.empty(), 0);
-        }
-        TrafficSnapshot t = cs.traffic();
-        OptionalLong rtt = cs.rttNanos();
-        long frames = cs.framesSent();
-        boolean closed = cs.lifecycle().isClosed();
-        if (!closed) {
-            UiPhase phase = switch (cs.phase()) {
-                case CONNECTING -> UiPhase.CONNECTING;
-                case AUTHENTICATING -> UiPhase.AUTHENTICATING;
-                case ATTACHING -> UiPhase.ATTACHING;
-                case ACTIVE -> UiPhase.ACTIVE;
-                case CLOSING -> UiPhase.CLOSING;
-            };
-            return clientSnapshot(phase, v, "", t, rtt, frames);
-        }
-        CompletableFuture<Void> released = cs.inputReleased();
-        if (released.isCompletedExceptionally()) {
-            return blank(UiPhase.FAILED, v.faultClosed() ? Messages.INPUT_FAULTED : Messages.INPUT_RELEASE_FAILED);
-        }
-        String message = v.faultClosed() ? Messages.INPUT_FAULTED : closeMessage(cs);
-        if (cs.terminated().isDone() && released.isDone()) {
-            return blank(UiPhase.IDLE, message);
-        }
-        return clientSnapshot(UiPhase.CLOSING, v, message, t, rtt, frames);
-    }
-
-    private Snapshot clientSnapshot(UiPhase phase, SlotView v, String message, TrafficSnapshot t, OptionalLong rtt,
-            long frames) {
-        return new Snapshot(role, phase, v.generation(), 0, message, v.host(), cfg.cmdPort(), cfg.imgPort(), null,
-                v.screenWidth(), v.screenHeight(), null, frames, false, stats(t, rtt));
+        if (cs == null) return new Snapshot(role, UiPhase.CONNECTING, v.generation(), 0, "", v.host(),
+                cfg.cmdPort(), cfg.imgPort(), null, 0, 0, null, 0, false, TrafficStats.ZERO, Snapshot.Cleanup.NONE);
+        ControlView view = cs.controlView();
+        boolean closed = view.phase() == ClientPhase.CLOSING;
+        if (closed && cs.socketsClosed().isDone() && cs.terminated().isDone()) return blank(UiPhase.IDLE, closeMessage(cs));
+        UiPhase phase = switch (view.phase()) {
+            case CONNECTING -> UiPhase.CONNECTING;
+            case AUTHENTICATING -> UiPhase.AUTHENTICATING;
+            case ATTACHING -> UiPhase.ATTACHING;
+            case ACTIVE -> UiPhase.ACTIVE;
+            case CLOSING -> UiPhase.CLOSING;
+        };
+        Optional<Packet.SizePayload> screen = cs.screen();
+        return new Snapshot(role, phase, view.generation(), view.inputEpoch(), closed ? closeMessage(cs) : "",
+                v.host(), cfg.cmdPort(), cfg.imgPort(), null,
+                screen.map(Packet.SizePayload::width).orElse(0), screen.map(Packet.SizePayload::height).orElse(0),
+                view.frame(), view.framesReceived(), view.controlEnabled(), stats(cs.traffic(), cs.rttNanos()), Snapshot.Cleanup.NONE);
     }
 
     private static String closeMessage(ClientSession cs) {
@@ -632,29 +597,26 @@ public final class AppRuntime implements Controller {
 
     // ---- input executor callbacks ------------------------------------------------------------------
 
+    private void publishBounds(ScreenGeometry geometry) { boundsSnapshot = geometry; }
+
     private Rectangle currentBounds() {
-        ScreenSource source = currentScreen;
-        return source == null ? new Rectangle() : source.geometry().bounds();
+        ScreenGeometry geometry = boundsSnapshot;
+        return geometry == null ? new Rectangle() : geometry.bounds();
     }
 
-    private void onInputFault(Throwable t) {
-        lastInputFault = t;
-        LOG.log(System.Logger.Level.WARNING, "input device fault: " + t.getClass().getSimpleName());
-        ClientSlot s;
-        ClientSession cs;
+    private void onInputFault(Throwable error) {
+        lastInputFault = error;
+        ServerCore c;
+        synchronized (lock) { c = core; }
+        ServerSession session = c == null ? null : c.sessions().current().orElse(null);
+        if (session == null || session.closeInfo().isPresent()) return;
         synchronized (lock) {
-            s = slot;
-            cs = s == null ? null : s.session;
+            if (core != c) return;
+            faultClosedSession = session;
         }
-        // A fault while the session is still open means input can no longer be trusted: close the session.
-        // A fault of the final release (session already closed) is reported as a release failure instead.
-        if (cs == null || cs.lifecycle().isClosed()) return;
-        synchronized (lock) {
-            s.faultClosed = true;
-        }
-        if (!cs.lifecycle().close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "input fault", true))) {
+        if (!session.close(new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "input fault", true))) {
             synchronized (lock) {
-                s.faultClosed = false; // somebody else closed it first
+                if (faultClosedSession == session) faultClosedSession = null;
             }
         }
     }
@@ -690,7 +652,7 @@ public final class AppRuntime implements Controller {
             }
             if (!appStopped) app.shutdownNow(); // interrupt a task stuck in an adapter or a bind
             workersStopped = appStopped; // rd-app counts as a worker, for both roles
-            if (role == LaunchOptions.Role.SERVER) {
+            if (role == LaunchOptions.Role.HOST) {
                 ServerCore c;
                 synchronized (lock) {
                     c = core;
@@ -698,12 +660,21 @@ public final class AppRuntime implements Controller {
                 if (c != null) {
                     // a session reserved while close() runs is only visible afterwards, so look on both sides
                     ServerSession before = c.sessions().current().orElse(null);
-                    c.close();
+                    c.closeUntil(deadline);
                     ServerSession after = c.sessions().current().orElse(null);
                     for (ServerSession session : new ServerSession[] {before, after == before ? null : after}) {
                         if (session == null) continue;
                         socketsClosed &= session.socketsClosed().isDone();
+                        await(session.socketsClosed(), deadline);
+                        await(session.terminated(), deadline);
+                        await(session.inputReleased(), deadline);
+                        socketsClosed &= session.socketsClosed().isDone();
                         workersStopped &= session.terminated().isDone();
+                        if (session.inputBeginCount() > 0) {
+                            CompletableFuture<Void> released = session.inputReleased();
+                            release = released.isCompletedExceptionally() ? InputRelease.FAILED
+                                    : released.isDone() ? InputRelease.RELEASED : InputRelease.UNCONFIRMED;
+                        }
                     }
                 }
             } else {
@@ -715,21 +686,19 @@ public final class AppRuntime implements Controller {
                     cs.lifecycle().close(new CloseInfo(Packet.DisconnectReason.SHUTDOWN, "app shutting down", true));
                     await(cs.socketsClosed(), deadline);
                     await(cs.terminated(), deadline);
-                    await(cs.inputReleased(), deadline);
                     socketsClosed = cs.socketsClosed().isDone();
                     workersStopped &= cs.terminated().isDone();
-                    CompletableFuture<Void> released = cs.inputReleased();
-                    if (cs.inputBeginCount() > 0) {
-                        release = released.isCompletedExceptionally() ? InputRelease.FAILED
-                                : released.isDone() ? InputRelease.RELEASED : InputRelease.UNCONFIRMED;
-                    }
                 }
-                CompletableFuture<Void> executorStopped = inputExecutor.shutdownAsync();
-                await(executorStopped, deadline);
-                workersStopped &= executorStopped.isDone();
                 ticker.close();
                 scheduler.shutdownNow();
                 cleanup.shutdownNow();
+            }
+            if (inputExecutor != null) {
+                CompletableFuture<Void> executorStopped = inputExecutor.shutdownAsync();
+                await(executorStopped, deadline);
+                workersStopped &= executorStopped.isDone() && !executorStopped.isCompletedExceptionally();
+                if (executorStopped.isCompletedExceptionally()) release = InputRelease.FAILED;
+                else if (!executorStopped.isDone() && release == InputRelease.RELEASED) release = InputRelease.UNCONFIRMED;
             }
             shutdownFuture.complete(new ShutdownReport(socketsClosed, workersStopped, release));
         } catch (Throwable e) {

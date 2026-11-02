@@ -9,7 +9,7 @@ import java.util.Objects;
 import java.util.function.LongSupplier;
 
 /** Everything a runtime needs besides its role; tests shorten timeouts and inject a clock. */
-public record AppConfig(InetAddress bindAddress, int cmdPort, int imgPort, String presetHost, Timeouts timeouts,
+public record AppConfig(InetAddress bindAddress, int cmdPort, int imgPort, String presetAddress, Timeouts timeouts,
         LongSupplier nanoClock, Duration shutdownBudget) {
 
     public AppConfig {
@@ -21,7 +21,7 @@ public record AppConfig(InetAddress bindAddress, int cmdPort, int imgPort, Strin
 
     /** Defaults for production: wildcard bind, system clock, a five second shutdown budget. */
     public static AppConfig from(LaunchOptions o) {
-        return new AppConfig(new InetSocketAddress(0).getAddress(), o.cmdPort(), o.imgPort(), o.host(),
+        return new AppConfig(new InetSocketAddress(0).getAddress(), o.cmdPort(), o.imgPort(), o.address(),
                 Timeouts.DEFAULTS, System::nanoTime, Duration.ofSeconds(5));
     }
 }

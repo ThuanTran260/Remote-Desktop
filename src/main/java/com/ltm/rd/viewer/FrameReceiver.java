@@ -4,10 +4,10 @@ import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
-import com.ltm.rd.common.PacketRules;
 import com.ltm.rd.common.PacketRules.Lane;
 import com.ltm.rd.common.PacketRules.Shell;
 import com.ltm.rd.common.PacketRules.Stage;
+import com.ltm.rd.common.PacketRules;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.ProtocolException;
 import com.ltm.rd.common.SessionPort;
@@ -48,7 +48,7 @@ public final class FrameReceiver implements Runnable {
         try {
             while (true) {
                 Optional<Packet> p = PacketIO.read(img.in(), Protocol.IMG_MAX_LEN,
-                        PacketRules.allowedIn(Shell.LISTENER, Lane.IMAGE, Stage.ACTIVE));
+                        PacketRules.allowedIn(Shell.CONNECTOR, Lane.IMAGE, Stage.ACTIVE));
                 if (p.isEmpty()) {
                     close(Packet.DisconnectReason.USER, "peer closed image channel", false);
                     return;

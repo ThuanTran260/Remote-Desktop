@@ -43,17 +43,22 @@ class ServerSessionAttachTest {
         return t;
     });
     private final AtomicBoolean shuttingDown = new AtomicBoolean();
+    private final com.ltm.rd.common.FakeClock clock = new com.ltm.rd.common.FakeClock();
+
+
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
 
     @AfterEach
     void shutdown() {
         scheduler.shutdownNow();
         cleanup.shutdownNow();
+        hostResources.close();
     }
 
     private ServerSession session() throws Exception {
         SessionLifecycle<ServerPhase> lifecycle = new SessionLifecycle<>(ServerPhase.RESERVED, ServerPhase.CLOSING,
                 System::nanoTime, Duration.ofMillis(50), scheduler, cleanup);
-        ServerSession.Env env = new ServerSession.Env(TIMEOUTS, () -> 0L, null, shuttingDown::get, null);
+        ServerSession.Env env = hostResources.env(TIMEOUTS, clock, null, shuttingDown::get, null, null);
         return new ServerSession(1, TOKEN, InetAddress.getLoopbackAddress(), 0, lifecycle, env);
     }
 
@@ -72,7 +77,7 @@ class ServerSessionAttachTest {
     }
 
     private static AttachResult attach(ServerSession session, PendingConnection pc, long now) {
-        return attach(session, pc, 1, TOKEN, now);
+        return attach(session, pc, 2, TOKEN, now);
     }
 
     /** A rejected connection stays claimable, so the handler closes exactly that socket. */
@@ -118,20 +123,25 @@ class ServerSessionAttachTest {
     void attachAfterTheReserveWindowIsRejectedButBeforeItIsAccepted() throws Exception {
         ServerSession session = session();
         PendingConnection expired = pending(s(4));
+        clock.set(s(5));
         assertRejectedAndClaimable(attach(session, expired, s(5)), expired); // now == reservedAt + reserve
+        assertEquals(Packet.DisconnectReason.TIMEOUT, session.closeInfo().orElseThrow().reason());
+        assertEquals(ServerPhase.CLOSING, session.phase());
+        clock.set(s(5) - 1);
+        ServerSession fresh = session();
         PendingConnection inTime = pending(s(4));
-        assertEquals(AttachResult.ATTACHED, attach(session, inTime, s(5) - 1), "the token was not consumed");
+        assertEquals(AttachResult.ATTACHED, attach(fresh, inTime, s(5) - 1), "a fresh session accepts just before its deadline");
     }
 
     @Test
     void badVersionWrongTokenAndShutdownAreRejectedWithoutConsumingTheToken() throws Exception {
         ServerSession session = session();
         PendingConnection badVersion = pending(0);
-        assertRejectedAndClaimable(attach(session, badVersion, 2, TOKEN, s(1)), badVersion);
+        assertRejectedAndClaimable(attach(session, badVersion, 1, TOKEN, s(1)), badVersion);
         byte[] other = TOKEN.clone();
         other[0] ^= 0x7F;
         PendingConnection wrongToken = pending(0);
-        assertRejectedAndClaimable(attach(session, wrongToken, 1, other, s(1)), wrongToken);
+        assertRejectedAndClaimable(attach(session, wrongToken, 2, other, s(1)), wrongToken);
         shuttingDown.set(true);
         PendingConnection shutdown = pending(0);
         assertRejectedAndClaimable(attach(session, shutdown, s(1)), shutdown);

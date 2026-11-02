@@ -1,17 +1,23 @@
 package com.ltm.rd.server;
 
-import com.ltm.rd.viewer.DelegatingImageReader;
-import com.ltm.rd.viewer.FrameDecoder;
-import com.ltm.rd.viewer.FrameReceiver;
-
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.host.FrameEncoder;
+import com.ltm.rd.client.ClientConfig;
+import com.ltm.rd.client.ClientHooks;
+import com.ltm.rd.client.ClientSession;
+import com.ltm.rd.client.ClientTestAccess;
+import com.ltm.rd.client.SocketConnector;
 import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
 import com.ltm.rd.common.SessionLifecycle;
+import com.ltm.rd.common.Ticker;
+import com.ltm.rd.common.Timeouts;
+import com.ltm.rd.host.FrameEncoder;
+import com.ltm.rd.viewer.DelegatingImageReader;
+import com.ltm.rd.viewer.FrameDecoder;
+import com.ltm.rd.viewer.FrameReceiver;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -49,10 +55,12 @@ class FrameReceiverTest {
         cleanup.shutdownNow();
     }
 
-    private ServerSession session() {
-        SessionLifecycle<ServerPhase> lifecycle = new SessionLifecycle<>(ServerPhase.RESERVED, ServerPhase.CLOSING,
-                System::nanoTime, Duration.ofMillis(50), scheduler, cleanup);
-        return new ServerSession(1, TOKEN, InetAddress.getLoopbackAddress(), 0, lifecycle);
+    private ClientSession session() {
+        Ticker ticker = new Ticker(Duration.ofHours(1), System::nanoTime);
+        ClientSession session = new ClientSession(new ClientConfig("127.0.0.1", 1, 2, "123456", Timeouts.DEFAULTS, System::nanoTime),
+                1, SocketConnector.DEFAULT, ClientHooks.none(), ticker, scheduler, cleanup);
+        session.lifecycle().addStopHook(ticker::close);
+        return session;
     }
 
     private static Channel channelOver(byte[] bytes) {
@@ -71,8 +79,8 @@ class FrameReceiverTest {
         return new FrameEncoder(8192, 0.6f).encode(new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB)).jpeg();
     }
 
-    private static CloseInfo run(ServerSession session, byte[] bytes, FrameDecoder decoder) {
-        new FrameReceiver(session.port(), session.controlSide(), channelOver(bytes), decoder, 1920, 1080, System::nanoTime).run();
+    private static CloseInfo run(ClientSession session, byte[] bytes, FrameDecoder decoder) {
+        new FrameReceiver(ClientTestAccess.port(session), ClientTestAccess.controlSide(session), channelOver(bytes), decoder, 1920, 1080, System::nanoTime).run();
         return session.lifecycle().closeInfo().orElseThrow();
     }
 
@@ -85,6 +93,21 @@ class FrameReceiverTest {
         assertEquals("invalid frame", info.message());
         assertEquals(0, spy.readCalls.get(), "the pixels of a mislabelled frame must never be decoded");
         assertEquals(1, spy.disposeCalls.get());
+    }
+
+    @Test void validFrameUsesViewerRulesAndPublishesBeforeEof() throws Exception {
+        ClientSession session = session();
+        var port = ClientTestAccess.port(session);
+        var target = new com.ltm.rd.viewer.ControlSide(port, Timeouts.DEFAULTS, System::nanoTime, false);
+        port.atomically(stx -> { target.onPacket(stx, Packet.screenInfo(1920, 1080)); return null; });
+        session.lifecycle().atomically(tx -> tx.advance(com.ltm.rd.client.ClientPhase.CONNECTING,
+                com.ltm.rd.client.ClientPhase.ACTIVE));
+        Channel image = channelOver(wire(Packet.frame(1280, 720, jpeg(1280, 720))));
+        port.atomically(stx -> target.onActive(stx, System.nanoTime(), image));
+        new FrameReceiver(port, target, image, new FrameDecoder(), 1920, 1080, System::nanoTime).run();
+        assertEquals(1, target.framesReceived(), "a valid v2 Host frame must be decoded and published");
+        assertEquals(Packet.DisconnectReason.USER, session.lifecycle().closeInfo().orElseThrow().reason());
+        assertEquals("peer closed image channel", session.lifecycle().closeInfo().orElseThrow().message());
     }
 
     @Test

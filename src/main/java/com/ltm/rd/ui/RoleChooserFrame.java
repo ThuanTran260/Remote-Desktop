@@ -20,10 +20,10 @@ final class RoleChooserFrame extends JFrame {
         JPanel content = new JPanel(new GridLayout(0, 1, 8, 8));
         content.setBorder(BorderFactory.createEmptyBorder(16, 16, 16, 16));
         content.add(new JLabel("Chọn vai trò của máy này:", SwingConstants.CENTER));
-        JButton server = new JButton("Máy điều khiển (Server)");
-        JButton client = new JButton("Máy được điều khiển (Client)");
-        server.addActionListener(e -> onChoose.accept(LaunchOptions.Role.SERVER));
-        client.addActionListener(e -> onChoose.accept(LaunchOptions.Role.CLIENT));
+        JButton server = new JButton("Host — Máy bị điều khiển");
+        JButton client = new JButton("Viewer — Máy điều khiển");
+        server.addActionListener(e -> onChoose.accept(LaunchOptions.Role.HOST));
+        client.addActionListener(e -> onChoose.accept(LaunchOptions.Role.VIEWER));
         content.add(server);
         content.add(client);
         setContentPane(content);

@@ -16,12 +16,32 @@ import org.junit.jupiter.api.Timeout;
 
 @Timeout(60)
 class ServerCoreCleanupTest {
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
+
+    @org.junit.jupiter.api.AfterEach void closeHostResources() { hostResources.close(); }
+
     private static final InetAddress LO = InetAddress.getLoopbackAddress();
     private static final long WAIT_S = 10;
 
-    private static ServerCore core() {
-        return new ServerCore(new ServerConfig(LO, 0, 0, Timeouts.DEFAULTS, System::nanoTime,
+    private ServerCore core() {
+        return hostResources.core(new ServerConfig(LO, 0, 0, Timeouts.DEFAULTS, System::nanoTime,
                 new SecureRandom()));
+    }
+
+    @Test
+    void acceptedSocketOptionsRequestImageBufferOnlyForImage() throws Exception {
+        class RecordingSocket extends java.net.Socket {
+            final java.util.List<String> calls = new java.util.ArrayList<>();
+            @Override public void setTcpNoDelay(boolean value) { calls.add("nodelay:" + value); }
+            @Override public void setSendBufferSize(int value) { calls.add("sendBuffer:" + value); }
+            @Override public void setSoTimeout(int value) { calls.add("timeout:" + value); }
+        }
+        RecordingSocket command = new RecordingSocket();
+        RecordingSocket image = new RecordingSocket();
+        ServerCore.configureAcceptedSocket(command, HandshakeHandler.Kind.COMMAND, 3000);
+        ServerCore.configureAcceptedSocket(image, HandshakeHandler.Kind.IMAGE, 3000);
+        assertEquals(java.util.List.of("nodelay:true", "timeout:3000"), command.calls);
+        assertEquals(java.util.List.of("nodelay:true", "sendBuffer:65536", "timeout:3000"), image.calls);
     }
 
     @Test

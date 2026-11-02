@@ -10,7 +10,9 @@ import java.awt.image.BufferedImage;
  */
 public record Snapshot(LaunchOptions.Role role, UiPhase phase, long generation, long inputEpoch, String message,
         String peer, int cmdPort, int imgPort, String code, int screenWidth, int screenHeight,
-        BufferedImage frame, long frameCount, boolean controlEnabled, TrafficStats stats) {
+        BufferedImage frame, long frameCount, boolean controlEnabled, TrafficStats stats, Cleanup cleanup) {
+
+    public enum Cleanup { NONE, WORKERS, INPUT_PENDING, INPUT_FAILED, INPUT_FAULTED }
 
     /** Never prints the code, the peer address or the image. */
     @Override

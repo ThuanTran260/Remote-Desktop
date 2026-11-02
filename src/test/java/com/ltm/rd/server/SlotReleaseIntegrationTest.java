@@ -38,6 +38,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** The slot and PIN stay owned until every part of the old session has finished closing. */
 @Timeout(60)
@@ -49,6 +51,9 @@ class SlotReleaseIntegrationTest {
     private final List<RawPeer> peers = new ArrayList<>();
     private final List<CountDownLatch> releases = new ArrayList<>();
     private final List<Thread> releaseWaiters = new ArrayList<>();
+
+
+    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources();
 
     @AfterEach
     void cleanup() throws Exception {
@@ -67,6 +72,7 @@ class SlotReleaseIntegrationTest {
                 assertTrue(cmd.isBound() && img.isBound(), "both listening ports are released");
             }
         }
+        hostResources.close();
         awaitTrue(() -> liveRdThreads().isEmpty(), "all rd-* threads to stop");
     }
 
@@ -77,7 +83,7 @@ class SlotReleaseIntegrationTest {
     }
 
     private ServerCore core(ServerCore.Seams seams) throws IOException {
-        ServerCore core = new ServerCore(new ServerConfig(LO, 0, 0, Timeouts.DEFAULTS, clock,
+        ServerCore core = hostResources.core(new ServerConfig(LO, 0, 0, Timeouts.DEFAULTS, clock,
                 new SecureRandom()), seams);
         core.start();
         cores.add(core);
@@ -144,6 +150,129 @@ class SlotReleaseIntegrationTest {
             }
         }
         if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    @RepeatedTest(20)
+    void authRacingEndSessionKeepsSlotUntilRelease() throws Exception {
+        ServerCore core = core(ServerCore.Seams.none());
+        for (boolean authFirst : new boolean[] {true, false}) {
+            RawPeer command = auth(core, Packet.AuthStatus.OK);
+            ServerSession session = core.sessions().current().orElseThrow();
+            String code = core.sessions().currentCode();
+            try (RawPeer image = RawPeer.connect(core.imgPort())) {
+                image.send(Packet.attach(session.token()));
+                command.readUntil(com.ltm.rd.common.PacketType.SCREEN_INFO);
+                command.readUntil(com.ltm.rd.common.PacketType.SESSION_ACTIVE);
+                assertEquals(1, session.inputBeginCount());
+                int key = authFirst ? 17 : 18;
+                command.send(Packet.keyPress(key));
+                assertTrue(hostResources.device.awaitCall("keyPress:" + key));
+                var gate = hostResources.device.blockOn("keyRelease:" + key);
+                try {
+                    session.disconnect();
+                    assertTrue(gate.awaitEntered());
+                    if (authFirst) {
+                        auth(core, Packet.AuthStatus.BUSY);
+                        assertSame(session, core.sessions().current().orElseThrow());
+                        assertEquals(code, core.sessions().currentCode());
+                        assertFalse(session.inputReleased().isDone());
+                    }
+                    gate.open();
+                    session.socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
+                    session.terminated().get(WAIT_S, TimeUnit.SECONDS);
+                    session.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+                    awaitTrue(() -> core.sessions().current().isEmpty(), "all three release stages before the next AUTH");
+                    assertNotEquals(code, core.sessions().currentCode());
+                    RawPeer next = auth(core, Packet.AuthStatus.OK);
+                    ServerSession newer = core.sessions().current().orElseThrow();
+                    assertTrue(newer.generation() > session.generation());
+                    assertEquals(0, newer.inputBeginCount(), "reserving the next slot does not overlap begin");
+                    next.close();
+                    newer.terminated().get(WAIT_S, TimeUnit.SECONDS);
+                    newer.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+                    awaitTrue(() -> core.sessions().current().isEmpty(), "the reserved probe is cleaned before the next order");
+                } finally { gate.open(); }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void activationOfferOverflowAfterBeginWaitsForRelease(boolean closedWriter) throws Exception {
+        ReleaseGate gate = releaseGate();
+        CountDownLatch writerEntered = new CountDownLatch(1);
+        CountDownLatch writerRelease = releaseLatch();
+        AtomicReference<ServerSession> reserved = new AtomicReference<>();
+        AtomicReference<CompletableFuture<Void>> endSource = new AtomicReference<>();
+        java.util.concurrent.atomic.AtomicInteger endCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.ThreadFactory threads = body -> new Thread(() -> {
+            if (Thread.currentThread().getName().startsWith("rd-cmd-writer-")) {
+                writerEntered.countDown();
+                awaitUninterruptibly(writerRelease);
+            }
+            body.run();
+        });
+        com.ltm.rd.host.AdapterFactory adapters = new com.ltm.rd.host.AdapterFactory() {
+            @Override public com.ltm.rd.host.InputDevice inputDevice() { throw new AssertionError(); }
+            @Override public void refreshInputDevice() { }
+            @Override public com.ltm.rd.host.ScreenSource newScreenSource() {
+                return new com.ltm.rd.host.FakeScreenSource(1920, 1080);
+            }
+        };
+        ServerCore core = new ServerCore(new ServerConfig(LO, 0, 0, Timeouts.DEFAULTS, clock, new SecureRandom()),
+                hostResources.input, adapters, geometry -> {
+                    ServerSession session = reserved.get();
+                    assertEquals(1, session.inputBeginCount());
+                    try {
+                        var field = ServerSession.class.getDeclaredField("writer");
+                        field.setAccessible(true);
+                        var writer = (com.ltm.rd.common.CommandWriter) field.get(session);
+                        if (closedWriter) writer.stop();
+                        else for (int i = 1; i < com.ltm.rd.common.CommandWriter.DEFAULT_CAPACITY; i++) {
+                            assertEquals(com.ltm.rd.common.CommandWriter.OfferResult.ACCEPTED, writer.offer(Packet.pong(i)));
+                        }
+                    } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+                }, () -> { }, reserved::set, new ServerCore.Seams(threads, null, null, false, null, null, source -> {
+                    endCalls.incrementAndGet();
+                    endSource.set(source);
+                    return gate.hold(source);
+                }));
+        cores.add(core);
+        core.start();
+        String code = core.sessions().currentCode();
+        auth(core, Packet.AuthStatus.OK);
+        assertTrue(writerEntered.await(WAIT_S, TimeUnit.SECONDS));
+        ServerSession session = reserved.get();
+        CompletableFuture<Void> target = session.inputReleased();
+        assertFalse(target.isDone());
+        awaitTrue(() -> session.screen().isPresent(), "SCREEN_INFO is accepted before rejection is armed");
+        try (RawPeer image = RawPeer.connect(core.imgPort())) {
+            image.send(Packet.attach(session.token()));
+            session.socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
+            var first = session.closeInfo().orElseThrow();
+            assertEquals(closedWriter ? Packet.DisconnectReason.PROTOCOL_ERROR : Packet.DisconnectReason.OVERFLOW,
+                    first.reason());
+            assertEquals(closedWriter ? "activation rejected" : "command queue overflow", first.message());
+            assertEquals(ServerPhase.CLOSING, session.phase());
+            assertEquals(1, session.inputBeginCount());
+            assertEquals(0, session.senderRuns());
+            assertFalse(session.close(new com.ltm.rd.common.CloseInfo(Packet.DisconnectReason.USER, "later close", false)));
+            assertSame(first, session.closeInfo().orElseThrow());
+            assertEquals(1, endCalls.get());
+            endSource.get().get(WAIT_S, TimeUnit.SECONDS);
+            assertSame(target, session.inputReleased());
+            assertFalse(target.isDone());
+            writerRelease.countDown();
+            session.terminated().get(WAIT_S, TimeUnit.SECONDS);
+            auth(core, Packet.AuthStatus.BUSY);
+            assertSame(session, core.sessions().current().orElseThrow());
+            assertEquals(code, core.sessions().currentCode());
+            gate.release().countDown();
+            target.get(WAIT_S, TimeUnit.SECONDS);
+            awaitTrue(() -> core.sessions().current().isEmpty(), "the final input target releases the slot");
+            assertNotEquals(code, core.sessions().currentCode());
+            assertEquals(1, endCalls.get());
+        }
     }
 
     @RepeatedTest(20)
@@ -261,7 +390,7 @@ class SlotReleaseIntegrationTest {
             return reader;
         });
         assertTrue(session.lifecycle().startWorker("rd-held-frame-decoder",
-                new FrameReceiver(session.port(), session.controlSide(), channel, decoder, 16, 9, clock)));
+                () -> decoder.decode(Packet.frame(16, 9, jpeg).framePayload(), 16, 9)));
         try {
             assertTrue(decoding.await(WAIT_S, TimeUnit.SECONDS));
             client.close();

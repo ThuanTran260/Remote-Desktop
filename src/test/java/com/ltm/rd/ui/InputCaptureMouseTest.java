@@ -36,9 +36,9 @@ class InputCaptureMouseTest {
             capture = new InputCapture(sink, panel, () -> focus, focusRequests::incrementAndGet);
             if (applySnapshot) {
                 edt(() -> {
-                    panel.apply(new Snapshot(LaunchOptions.Role.SERVER, UiPhase.ACTIVE, 7, 3, "", "10.0.0.2", 5001, 5000,
+                    panel.apply(new Snapshot(LaunchOptions.Role.VIEWER, UiPhase.ACTIVE, 7, 3, "", "10.0.0.2", 5001, 5000,
                             "123456", rw, rh, new BufferedImage(4, 4, BufferedImage.TYPE_INT_RGB), 1, true,
-                            TrafficStats.ZERO));
+                            TrafficStats.ZERO, Snapshot.Cleanup.NONE));
                     PaintSupport.paintNow(panel); // the gate opens only once the frame is painted
                     capture.onApplied(7, 3);
                 });
@@ -389,9 +389,9 @@ class InputCaptureMouseTest {
         Fixture f = new Fixture();
         f.press(480, 270, B1);
         // a stall: the same generation, a newer epoch, control disabled
-        edt(() -> f.panel.apply(new Snapshot(LaunchOptions.Role.SERVER, UiPhase.ACTIVE, 7, 3, "", "10.0.0.2", 5001, 5000,
+        edt(() -> f.panel.apply(new Snapshot(LaunchOptions.Role.VIEWER, UiPhase.ACTIVE, 7, 3, "", "10.0.0.2", 5001, 5000,
                 "123456", 1920, 1080, new BufferedImage(4, 4, BufferedImage.TYPE_INT_RGB), 1, false,
-                TrafficStats.ZERO)));
+                TrafficStats.ZERO, Snapshot.Cleanup.NONE)));
         f.release(480, 270, B1);
         assertEquals(List.of("press 960,540,1"), f.sink.described());
         assertEquals(0, f.held());

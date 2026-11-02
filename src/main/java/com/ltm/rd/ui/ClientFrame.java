@@ -10,35 +10,33 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JTextField;
 
-/**
- * Window of the controlled machine. Pressing Connect is the user's consent to share the screen;
- * while ACTIVE the always-on-top {@link SharingBar} shows who controls it and a Stop button. The
- * host given on the command line only pre-fills the field.
- */
+/** Viewer form: connection attempts, input errors and the active control window. */
 final class ClientFrame extends JFrame {
     private final Controller controller;
     private final JTextField host = new JTextField(16);
     private final JTextField code = new JTextField(8);
     private final JButton connect = new JButton("Kết nối");
     private final JButton cancel = new JButton("Hủy");
-    private final JButton stop = new JButton("Dừng");
+    private final JButton stop = new JButton("Ngắt");
     private final JLabel status = new JLabel(" ");
-    private final SharingBar sharingBar;
+    private ControlFrame control;
+    private Snapshot lastApplied;
+    private boolean disposed;
+    private boolean closing;
     private final ClosingWatch closingWatch = new ClosingWatch(System::nanoTime);
     private final SnapshotFeed feed;
-    private String pendingText; // why connect() did not start, until the next real state
+    private ClientFormState.PendingText pendingText;
 
     ClientFrame(Controller controller, String presetHost, Runnable onExit) {
-        super("Máy được điều khiển (Client)");
+        super("Viewer — Máy điều khiển");
         this.controller = controller;
-        sharingBar = new SharingBar(controller);
         if (presetHost != null) host.setText(presetHost); // pre-fill only: never connects by itself
 
         JPanel content = new JPanel(new GridLayout(0, 1, 4, 4));
         content.setBorder(BorderFactory.createEmptyBorder(12, 16, 12, 16));
-        content.add(new JLabel("IP máy điều khiển:"));
+        content.add(new JLabel("IP máy Host:"));
         content.add(host);
-        content.add(new JLabel("Mã (6 chữ số):"));
+        content.add(new JLabel("Mã kết nối (6 chữ số):"));
         content.add(code);
         JPanel buttons = new JPanel(new GridLayout(1, 0, 8, 0));
         buttons.add(connect);
@@ -56,13 +54,24 @@ final class ClientFrame extends JFrame {
         cancel.addActionListener(e -> controller.cancel());
         stop.addActionListener(e -> controller.disconnect());
 
+        javax.swing.event.DocumentListener edited = new javax.swing.event.DocumentListener() {
+            private void changed() {
+                pendingText = null;
+                if (lastApplied != null) status.setText(ClientFormState.of(lastApplied, false).statusText());
+            }
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+        };
+        host.getDocument().addDocumentListener(edited);
+        code.getDocument().addDocumentListener(edited);
+
         feed = new SnapshotFeed(controller, this::apply);
         addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) { // closing is the same as Stop
-                controller.disconnect();
-                feed.close();
-                sharingBar.dispose();
+                if (closing) return;
+                closing = true;
                 dispose();
                 onExit.run();
             }
@@ -74,8 +83,9 @@ final class ClientFrame extends JFrame {
 
     private void connectNow() {
         ConnectOutcome outcome = controller.connect(host.getText(), code.getText());
-        pendingText = outcome == ConnectOutcome.STARTED ? null : ClientFormState.textFor(outcome);
-        if (pendingText != null) status.setText(pendingText);
+        pendingText = ClientFormState.pendingFor(outcome, lastApplied == null ? 0 : lastApplied.generation());
+        if (outcome == ConnectOutcome.STARTED) code.setText("");
+        if (pendingText != null) status.setText(pendingText.text());
     }
 
     /** EDT: shows the newest snapshot. */
@@ -86,16 +96,30 @@ final class ClientFrame extends JFrame {
         connect.setEnabled(st.connectEnabled());
         cancel.setVisible(st.cancelVisible());
         stop.setVisible(st.disconnectVisible());
-        if (s.phase() == UiPhase.IDLE && s.message().isEmpty() && pendingText != null) {
-            status.setText(pendingText);
-        } else {
-            pendingText = null;
-            status.setText(st.statusText());
+        lastApplied = s;
+        if (pendingText != null) pendingText = pendingText.retainFor(s);
+        status.setText(pendingText == null ? st.statusText() : pendingText.text());
+        if (st.controlWindowVisible()) {
+            if (control == null) {
+                control = new ControlFrame(controller, feed::latest);
+                control.setVisible(true);
+            }
+            control.apply(s);
+        } else closeControl();
+    }
+
+    private void closeControl() {
+        if (control != null) {
+            control.dispose();
+            control = null;
         }
-        if (st.sharingBarVisible()) {
-            sharingBar.showFor(st.statusText());
-        } else {
-            sharingBar.hideBar();
-        }
+    }
+
+    @Override public void dispose() {
+        if (disposed) return;
+        disposed = true;
+        feed.close();
+        closeControl();
+        super.dispose();
     }
 }
