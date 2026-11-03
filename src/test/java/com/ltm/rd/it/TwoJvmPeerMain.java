@@ -18,11 +18,9 @@ import java.awt.GraphicsEnvironment;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.image.BufferedImage;
-import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.InetAddress;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -59,6 +57,8 @@ public final class TwoJvmPeerMain {
     private Surface surface;
     private RemotePanel panel;
     private String stage = "startup";
+    private ShutdownReport shutdownReport;
+    private java.util.function.Consumer<String> diagnostic;
 
     private TwoJvmPeerMain(String role, PrintStream wire) {
         this.role = role;
@@ -67,25 +67,29 @@ public final class TwoJvmPeerMain {
 
     public static void main(String[] args) throws Exception {
         PrintStream privateWire = System.out;
-        // Product stdout never becomes protocol. Product stderr is separately piped and fully redacted by the parent.
-        System.setOut(new PrintStream(OutputStream.nullOutputStream()));
+        // Keep private control stdout isolated from product output and structured diagnostics.
+        var diagnostic = TwoJvmDiagnostics.install(System.err);
         if (args.length != 2 || !args[0].equals("--child-role")
                 || (!args[1].equals("host") && !args[1].equals("viewer"))) {
+            diagnostic.accept("DIAG failure phase=arguments reason=InvalidRole");
             privateWire.println("FAILURE arguments InvalidRole");
             System.exit(2);
             return;
         }
         TwoJvmPeerMain peer = new TwoJvmPeerMain(args[1], privateWire);
+        peer.diagnostic = diagnostic;
         int exit = 0;
         try {
             peer.run();
         } catch (Throwable failure) {
-            peer.event("FAILURE " + peer.stage + " " + failure.getClass().getSimpleName());
+            TwoJvmDiagnostics.failure(diagnostic, peer.stage, failure);
+            peer.event("FAILURE " + TwoJvmDiagnostics.phase(peer.stage) + " " + TwoJvmDiagnostics.reason(failure));
             exit = 1;
         } finally {
             try { peer.cleanup(); }
             catch (Throwable failure) {
-                peer.event("FAILURE cleanup " + failure.getClass().getSimpleName());
+                TwoJvmDiagnostics.failure(diagnostic, "cleanup", failure);
+                peer.event("FAILURE cleanup " + TwoJvmDiagnostics.reason(failure));
                 exit = 2;
             }
         }
@@ -104,7 +108,8 @@ public final class TwoJvmPeerMain {
             if (GraphicsEnvironment.isHeadless()) throw new IllegalStateException("HostDesktopUnavailable");
             createSurface();
             runtime = AppRuntime.forHost(config(0, 0), new RobotAdapterFactory());
-            runtime.startHost().get(7, TimeUnit.SECONDS);
+            try { runtime.startHost().get(7, TimeUnit.SECONDS); }
+            catch (Exception failure) { throw new IllegalStateException("HostNotListening", failure); }
             Snapshot listening = runtime.snapshot();
             if (listening.phase() != UiPhase.LISTENING || listening.cmdPort() <= 0 || listening.imgPort() <= 0
                     || listening.code() == null || !listening.code().matches("[0-9]{6}")) {
@@ -148,31 +153,61 @@ public final class TwoJvmPeerMain {
                     requireRole("host");
                     stage = "native_input_focus";
                     edt(() -> {
-                        surface.keys.clear();
-                        surface.invalidInput = false;
-                        surface.armed = true;
+                        surface.recorder.arm();
                         window.toFront();
                         surface.requestFocusInWindow();
                         return null;
                     });
-                    await(() -> uncheckedEdt(() -> surface.isFocusOwner() && surface.painted.getCount() == 0), Duration.ofSeconds(5));
+                    try {
+                        await(() -> uncheckedEdt(() -> surface.isFocusOwner() && surface.painted.getCount() == 0), Duration.ofSeconds(5));
+                    } catch (java.util.concurrent.TimeoutException failure) {
+                        throw new IllegalStateException("TargetNotFocused", failure);
+                    }
                     event("FOCUSED");
                 }
                 case "INPUT" -> input();
+                case "OBSERVE_INPUT" -> {
+                    requireRole("host");
+                    stage = "actual_native_events";
+                    await(() -> uncheckedEdt(() -> surface.recorder.ready()), Duration.ofSeconds(10));
+                    // A lower bound only: recording stays armed through session close and the native fence.
+                    event("INPUT_OBSERVED");
+                }
                 case "EVENTS" -> {
                     requireRole("host");
                     stage = "actual_native_events";
-                    await(() -> uncheckedEdt(() -> surface.keys.size() >= 100 || surface.invalidInput), Duration.ofSeconds(10));
-                    List<String> keys = edt(() -> {
-                        if (surface.invalidInput) throw new IllegalStateException("ModifiersOrUnexpectedKey");
-                        surface.armed = false;
-                        return List.copyOf(surface.keys);
+                    List<String> keys = TwoJvmInputCompletion.finish(surface.recorder, () -> {
+                        if (shutdownReport == null || !shutdownReport.socketsClosed() || !shutdownReport.workersStopped()
+                                || (shutdownReport.inputRelease() != com.ltm.rd.ui.InputRelease.RELEASED
+                                && shutdownReport.inputRelease() != com.ltm.rd.ui.InputRelease.NOT_NEEDED)) {
+                            throw new IllegalStateException("UncleanRuntimeShutdown");
+                        }
+                        // Stop recurring snapshot/EDT work before synchronizing the native event queue.
+                        monitor.shutdownNow();
+                        if (!monitor.awaitTermination(2, TimeUnit.SECONDS)) throw new IllegalStateException("MonitorNotStopped");
+                        TwoJvmInputCompletion.requireSupportedDesktop();
+                        edt(() -> { surface.requireFocus(); return null; });
+                        return null;
+                    }, () -> {
+                        try {
+                            java.awt.Robot probe = new java.awt.Robot();
+                            try { probe.keyPress(TwoJvmInputRecorder.PROBE_KEY); }
+                            finally { probe.keyRelease(TwoJvmInputRecorder.PROBE_KEY); }
+                        } catch (java.awt.AWTException failure) {
+                            throw new IllegalStateException("NativeSetupFailed", failure);
+                        } catch (IllegalArgumentException failure) {
+                            throw new IllegalStateException("NativeFenceUnsupported", failure);
+                        }
                     });
+                    edt(() -> { surface.requireFocus(); surface.recorder.audit(); return null; });
                     event("INPUT_EVENTS " + String.join(",", keys));
+                    event("INPUT_PROBE 2");
+                    event("INPUT_HELD 0");
                 }
                 case "SHUTDOWN" -> {
                     stage = "shutdown";
                     ShutdownReport report = shutdown();
+                    shutdownReport = report;
                     event("SHUTDOWN " + report.socketsClosed() + " " + report.workersStopped() + " " + report.inputRelease());
                 }
                 case "STOP" -> { return; }
@@ -241,7 +276,8 @@ public final class TwoJvmPeerMain {
             }
         } catch (Throwable failure) {
             if (!stopping && asynchronousFailure.compareAndSet(null, failure)) {
-                event("FAILURE snapshot_monitor " + failure.getClass().getSimpleName());
+                TwoJvmDiagnostics.failure(diagnostic, "snapshot_monitor", failure);
+                event("FAILURE snapshot_monitor " + TwoJvmDiagnostics.reason(failure));
             }
         }
     }
@@ -270,18 +306,23 @@ public final class TwoJvmPeerMain {
             return null;
         });
         if (!surface.painted.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("TargetNotPainted");
-        await(() -> uncheckedEdt(() -> surface.isFocusOwner()), Duration.ofSeconds(5));
+        try { await(() -> uncheckedEdt(() -> surface.isFocusOwner()), Duration.ofSeconds(5)); }
+        catch (java.util.concurrent.TimeoutException failure) { throw new IllegalStateException("TargetNotFocused", failure); }
     }
 
     private static final class Surface extends JPanel {
         final CountDownLatch painted = new CountDownLatch(1);
-        final List<String> keys = new ArrayList<>(); // EDT only.
-        boolean armed;
-        boolean invalidInput;
+        final TwoJvmInputRecorder recorder = new TwoJvmInputRecorder();
+        boolean disposing;
 
         Surface() {
             setFocusable(true);
             setFocusTraversalKeysEnabled(false);
+            addFocusListener(new java.awt.event.FocusAdapter() {
+                @Override public void focusLost(java.awt.event.FocusEvent event) {
+                    if (!disposing) recorder.reject(TwoJvmDiagnostics.Reason.TargetNotFocused);
+                }
+            });
             addKeyListener(new KeyAdapter() {
                 @Override public void keyPressed(KeyEvent event) { record("P", event); }
                 @Override public void keyReleased(KeyEvent event) { record("R", event); }
@@ -289,11 +330,12 @@ public final class TwoJvmPeerMain {
         }
 
         private void record(String kind, KeyEvent event) {
-            if (!armed) return;
-            if (event.getModifiersEx() != 0 || (event.getKeyCode() != KeyEvent.VK_A && event.getKeyCode() != KeyEvent.VK_B)) {
-                invalidInput = true;
-            }
-            keys.add(kind + event.getKeyCode());
+            if (!isFocusOwner()) recorder.reject(TwoJvmDiagnostics.Reason.TargetNotFocused);
+            recorder.record(kind, event);
+        }
+
+        private void requireFocus() {
+            if (!isFocusOwner() || !isShowing()) throw new IllegalStateException("TargetNotFocused");
         }
 
         @Override protected void paintComponent(Graphics graphics) {
@@ -340,12 +382,31 @@ public final class TwoJvmPeerMain {
                 }
             }
         } finally {
-            edt(() -> {
-                if (surface != null) surface.armed = false;
-                if (window != null) window.dispose();
-                return null;
-            });
+            Exception auditFailure = null;
+            try {
+                edt(() -> {
+                    try { if (surface != null) surface.recorder.audit(); }
+                    finally {
+                        if (surface != null) surface.disposing = true;
+                        if (window != null) window.dispose();
+                    }
+                    return null;
+                });
+            } catch (Exception failure) { auditFailure = failure; }
+            try {
+                edt(() -> {
+                    if (surface != null) {
+                        try { surface.recorder.audit(); }
+                        finally { surface.recorder.disarm(); }
+                    }
+                    return null;
+                });
+            } catch (Exception failure) {
+                if (auditFailure == null) auditFailure = failure;
+                else auditFailure.addSuppressed(failure);
+            }
             if (!monitor.awaitTermination(2, TimeUnit.SECONDS)) throw new IllegalStateException("MonitorNotStopped");
+            if (auditFailure != null) throw auditFailure;
         }
     }
 
@@ -372,7 +433,8 @@ public final class TwoJvmPeerMain {
     private static <T> T edt(Callable<T> work) throws Exception {
         FutureTask<T> task = new FutureTask<>(work);
         SwingUtilities.invokeLater(task);
-        return task.get(3, TimeUnit.SECONDS);
+        try { return task.get(3, TimeUnit.SECONDS); }
+        catch (java.util.concurrent.TimeoutException failure) { throw new IllegalStateException("EdtUnavailable", failure); }
     }
 
     private static boolean uncheckedEdt(Callable<Boolean> work) {

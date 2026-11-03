@@ -32,17 +32,24 @@ class TwoJvmIntegrationTest {
             assertEquals("FOCUSED", host.awaitEvent("FOCUSED", WAIT));
             viewer.send("INPUT");
             assertEquals("INPUT_SENT 100", viewer.awaitEvent("INPUT_SENT", WAIT));
-            host.send("EVENTS");
+            host.send("OBSERVE_INPUT");
+            assertEquals("INPUT_OBSERVED", host.awaitEvent("INPUT_OBSERVED", WAIT));
+            shutdown(viewer, false);
+            assertClosed(host, "host", WAIT); // Includes public session input-release/slot cleanup completion.
+            shutdown(host, false); // No further accepted or executing production input remains.
+            host.send("EVENTS"); // Acknowledged native test-control probe, then final EDT validation.
             List<String> expected = new ArrayList<>();
             for (int pair = 0; pair < 50; pair++) {
                 int key = pair % 2 == 0 ? 65 : 66;
                 expected.add("P" + key);
                 expected.add("R" + key);
             }
+            assertEquals(100, expected.size(), "remote application events");
+            expected.add("P61451"); // Distinct F24 delivery probe, injected only after production input stops.
+            expected.add("R61451");
             assertEquals("INPUT_EVENTS " + String.join(",", expected), host.awaitEvent("INPUT_EVENTS", WAIT));
-            shutdown(viewer, false);
-            assertClosed(host, "host", WAIT);
-            shutdown(host, false);
+            assertEquals("INPUT_PROBE 2", host.awaitEvent("INPUT_PROBE", WAIT));
+            assertEquals("INPUT_HELD 0", host.awaitEvent("INPUT_HELD", WAIT));
         }
     }
 

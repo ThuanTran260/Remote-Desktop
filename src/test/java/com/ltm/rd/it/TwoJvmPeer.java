@@ -34,6 +34,8 @@ final class TwoJvmPeer implements AutoCloseable {
         thread.setDaemon(true);
         return thread;
     });
+    private final java.util.concurrent.Future<?> stdoutReader;
+    private final java.util.concurrent.Future<?> diagnosticReader;
     private boolean closed;
     private volatile boolean childFailed;
     private boolean failureObserved;
@@ -63,18 +65,18 @@ final class TwoJvmPeer implements AutoCloseable {
         }
     }
 
-    private TwoJvmPeer(String role, Process process, Path evidence) throws IOException {
+    TwoJvmPeer(String role, Process process, Path evidence) throws IOException {
         this.role = role;
         this.process = process;
         eventsFile = evidence.resolve(role + "-events.txt");
-        stderrFile = evidence.resolve(role + "-stderr-redacted.txt");
+        stderrFile = evidence.resolve(role + "-diagnostics.txt");
         Files.writeString(eventsFile, "PID " + process.pid() + " parent=" + ProcessHandle.current().pid() + "\n",
                 StandardOpenOption.CREATE_NEW);
-        Files.writeString(stderrFile, "Only stderr line counts are retained; all raw text is discarded.\n",
+        Files.writeString(stderrFile, "Sanitized structured diagnostics; all unknown message/control text is redacted.\n",
                 StandardOpenOption.CREATE_NEW);
         commands = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
-        io.submit(() -> pump(process.getInputStream(), this::receive, () -> offer("EOF")));
-        io.submit(() -> pump(process.getErrorStream(), line -> append(stderrFile, "STDERR_LINE redacted\n"), () -> {}));
+        stdoutReader = io.submit(() -> pump(process.getInputStream(), this::receive, () -> offer("EOF")));
+        diagnosticReader = io.submit(() -> pump(process.getErrorStream(), line -> append(stderrFile, TwoJvmDiagnostics.sanitizeLine(line) + "\n"), () -> {}));
     }
 
     void send(String command) throws Exception {
@@ -107,18 +109,49 @@ final class TwoJvmPeer implements AutoCloseable {
         while (true) {
             long remaining = deadline - System.nanoTime();
             String event = remaining <= 0 ? null : events.poll(remaining, TimeUnit.NANOSECONDS);
-            if (event == null) throw new AssertionError(role + " timed out awaiting " + kind + "; alive=" + process.isAlive());
+            if (event == null) {
+                append(stderrFile, "DIAG failure phase=protocol reason=MissingEvent\n");
+                throw new EventTimeout(role + " timed out awaiting " + kind + "; alive=" + process.isAlive());
+            }
             String received = commandKind(event);
             if (received.equals("FAILURE") || received.equals("EOF")) {
+                if (received.equals("EOF")) {
+                    append(stderrFile, "DIAG failure phase=protocol reason=UnexpectedEof\n");
+                    throw new UnexpectedEof(role + " pipe closed awaiting " + kind);
+                }
                 failureObserved = true;
-                throw new AssertionError(role + " child failed while awaiting " + kind
-                        + "; environment/phase diagnostic=" + (received.equals("FAILURE") ? event : "pipe closed")
-                        + "; see sanitized evidence");
+                String[] fields = event.split(" ");
+                throw new ChildFailure(fields[1], fields[2]);
             }
             if (received.equals(kind)) return event;
             if (pending.size() >= 64) throw new AssertionError("Unexpected private event backlog");
             pending.addLast(event);
         }
+    }
+
+    static final class ChildFailure extends AssertionError {
+        final String phase;
+        final String reason;
+        ChildFailure(String phase, String reason) {
+            super("Child reported failure phase=" + phase + " reason=" + reason + "; see sanitized evidence");
+            this.phase = phase;
+            this.reason = reason;
+        }
+    }
+
+    static final class EventTimeout extends AssertionError {
+        EventTimeout(String message) { super(message); }
+    }
+
+    static final class UnexpectedEof extends AssertionError {
+        UnexpectedEof(String message) { super(message); }
+    }
+
+    int awaitFailureExit(Duration timeout) throws InterruptedException {
+        if (!failureObserved) throw new AssertionError("A child-reported failure must be observed first");
+        if (!process.waitFor(timeout.toNanos(), TimeUnit.NANOSECONDS)) throw new AssertionError("Failed child did not terminate");
+        if (process.exitValue() == 0) throw new AssertionError("Child-reported failure exited successfully");
+        return process.exitValue();
     }
 
     ProcessHandle processHandle() {
@@ -134,17 +167,20 @@ final class TwoJvmPeer implements AutoCloseable {
     private void receive(String line) {
         boolean valid = switch (commandKind(line)) {
             case "READY" -> line.equals("READY viewer") || line.matches("READY host [0-9]{1,5} [0-9]{1,5} [0-9]{6}");
-            case "ACTIVE", "FOCUSED" -> line.equals(commandKind(line));
+            case "ACTIVE", "FOCUSED", "INPUT_OBSERVED" -> line.equals(commandKind(line));
             case "FRAMES" -> line.matches("FRAMES [0-9]+ [0-9]+ [0-9]+");
             case "INPUT_SENT" -> line.equals("INPUT_SENT 100");
-            case "INPUT_EVENTS" -> line.matches("INPUT_EVENTS (?:[PR](?:65|66))(?:,[PR](?:65|66))*");
+            case "INPUT_HELD" -> line.equals("INPUT_HELD 0");
+            case "INPUT_PROBE" -> line.equals("INPUT_PROBE 2");
+            case "INPUT_EVENTS" -> line.matches("INPUT_EVENTS (?:[PR](?:65|66|61451))(?:,[PR](?:65|66|61451))*");
             case "CLOSED" -> line.matches("CLOSED (?:LISTENING|IDLE) NONE");
             case "SHUTDOWN" -> line.matches("SHUTDOWN (?:true|false) (?:true|false) (?:RELEASED|NOT_NEEDED|FAILED|UNCONFIRMED)");
-            case "FAILURE" -> line.matches("FAILURE [A-Za-z_]+ [A-Za-z_]+");
+            case "FAILURE" -> TwoJvmDiagnostics.failureEvent(line);
             default -> false;
         };
         if (!valid) {
             childFailed = true;
+            append(stderrFile, "DIAG failure phase=protocol reason=InvalidEvent\n");
             offer("FAILURE protocol InvalidEvent");
             return;
         }
@@ -156,6 +192,7 @@ final class TwoJvmPeer implements AutoCloseable {
 
     private void offer(String event) {
         if (!events.offer(event)) {
+            childFailed = true;
             events.clear();
             events.offer("FAILURE protocol EventOverflow");
         }
@@ -186,7 +223,11 @@ final class TwoJvmPeer implements AutoCloseable {
     private static String commandKind(String command) {
         int space = command.indexOf(' ');
         String kind = space < 0 ? command : command.substring(0, space);
-        return kind.matches("[A-Z_]+") ? kind : "INVALID";
+        return switch (kind) {
+            case "CONNECT", "FRAMES", "ARM_INPUT", "INPUT", "OBSERVE_INPUT", "EVENTS", "SHUTDOWN", "STOP",
+                    "READY", "ACTIVE", "FOCUSED", "INPUT_OBSERVED", "INPUT_SENT", "INPUT_EVENTS", "INPUT_HELD", "INPUT_PROBE", "CLOSED", "FAILURE", "EOF" -> kind;
+            default -> "INVALID";
+        };
     }
 
     private static synchronized void append(Path path, String safeText) {
@@ -226,6 +267,16 @@ final class TwoJvmPeer implements AutoCloseable {
                 long remaining = deadline - System.nanoTime();
                 if (remaining > 0) process.waitFor(remaining, TimeUnit.NANOSECONDS);
             } catch (InterruptedException failure) { interrupted = true; }
+            boolean pipesDrained = true;
+            long drainDeadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+            for (var reader : List.of(stdoutReader, diagnosticReader)) {
+                try {
+                    long remaining = drainDeadline - System.nanoTime();
+                    if (remaining <= 0) pipesDrained = false;
+                    else reader.get(remaining, TimeUnit.NANOSECONDS);
+                } catch (InterruptedException failure) { interrupted = true; pipesDrained = false; }
+                catch (Exception failure) { pipesDrained = false; }
+            }
             try { process.getOutputStream().close(); } catch (IOException ignored) { /* child was reaped */ }
             try { process.getInputStream().close(); } catch (IOException ignored) { /* child was reaped */ }
             try { process.getErrorStream().close(); } catch (IOException ignored) { /* child was reaped */ }
@@ -234,10 +285,10 @@ final class TwoJvmPeer implements AutoCloseable {
             try { ioStopped = io.awaitTermination(2, TimeUnit.SECONDS); }
             catch (InterruptedException failure) { interrupted = true; }
             boolean alive = owned.stream().anyMatch(ProcessHandle::isAlive);
-            append(eventsFile, "CLEANUP alive=" + alive + " ioStopped=" + ioStopped
+            append(eventsFile, "CLEANUP alive=" + alive + " ioStopped=" + ioStopped + " pipesDrained=" + pipesDrained
                     + " exit=" + (process.isAlive() ? "running" : process.exitValue()) + "\n");
             if (interrupted) Thread.currentThread().interrupt();
-            if (alive || !ioStopped) throw new AssertionError("Owned child/pipe cleanup incomplete; see sanitized evidence");
+            if (alive || !ioStopped || !pipesDrained) throw new AssertionError("Owned child/pipe cleanup incomplete; see sanitized evidence");
             if (!failureObserved && !expectedForcedExit && (childFailed || process.exitValue() != 0)) {
                 throw new AssertionError("Unobserved child failure/unclean exit; see sanitized evidence");
             }
