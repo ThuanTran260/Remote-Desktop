@@ -203,6 +203,7 @@ final class RecordingRelay implements AutoCloseable {
     private final List<Socket> imageSockets = new ArrayList<>();
     private volatile CountDownLatch authResultGate;
     private volatile CountDownLatch attachForwardGate;
+    private volatile ServerEofGate serverEofGate;
     private final List<Thread> threads = new ArrayList<>();
     private volatile boolean closed;
     private boolean tampered; // only touched by the single IMG C2S pump
@@ -249,6 +250,52 @@ final class RecordingRelay implements AutoCloseable {
 
     void holdAuthResult() { authResultGate = new CountDownLatch(1); }
     void holdAttachForward() { attachForwardGate = new CountDownLatch(1); }
+
+    /** Holds one server EOF until the test has observed the other channel's close decision. */
+    ServerEofGate holdServerEof(Lane lane) {
+        if (serverEofGate != null) throw new IllegalStateException("server EOF gate already installed");
+        serverEofGate = new ServerEofGate(lane);
+        return serverEofGate;
+    }
+
+    final class ServerEofGate {
+        private final Lane heldLane;
+        private final CountDownLatch reached = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private final AtomicReference<Throwable> failure = new AtomicReference<>();
+
+        private ServerEofGate(Lane heldLane) { this.heldLane = heldLane; }
+
+        void awaitHeld() throws InterruptedException {
+            if (!reached.await(MAX_WAIT_S, TimeUnit.SECONDS)) {
+                throw new AssertionError("server EOF did not reach the gate");
+            }
+            checkFailure();
+        }
+
+        void release() { release.countDown(); }
+
+        private void beforeForward(Lane lane) {
+            try {
+                if (lane == heldLane) {
+                    reached.countDown();
+                    if (!release.await(MAX_WAIT_S, TimeUnit.SECONDS)) {
+                        failure.compareAndSet(null, new AssertionError("server EOF gate release timed out"));
+                    }
+                } else if (!reached.await(MAX_WAIT_S, TimeUnit.SECONDS)) {
+                    failure.compareAndSet(null, new AssertionError("held server EOF was not observed"));
+                }
+            } catch (InterruptedException e) {
+                if (!closed) failure.compareAndSet(null, e);
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        private void checkFailure() {
+            Throwable cause = failure.get();
+            if (cause != null) throw new AssertionError("server EOF forwarding fixture failed", cause);
+        }
+    }
     void openAttachForwardGate() {
         CountDownLatch gate = attachForwardGate;
         if (gate != null) gate.countDown();
@@ -328,6 +375,8 @@ final class RecordingRelay implements AutoCloseable {
         } catch (IOException | RuntimeException e) {
             // the peer vanished or sent garbage: this direction is over
         } finally {
+            ServerEofGate gate = serverEofGate;
+            if (gate != null && dir == Dir.S2C) gate.beforeForward(lane);
             if (dir == Dir.S2C && lane == Lane.IMG) imageClosedByServer.countDown();
             shutdownOutput(to); // pass the EOF on without discarding what is still in flight the other way
             if (open.decrementAndGet() == 0) {
@@ -396,6 +445,8 @@ final class RecordingRelay implements AutoCloseable {
     @Override
     public void close() {
         closed = true;
+        ServerEofGate eofGate = serverEofGate;
+        if (eofGate != null) eofGate.release();
         openAuthResultGate();
         openAttachForwardGate();
         imageGate.countDown();
@@ -416,10 +467,15 @@ final class RecordingRelay implements AutoCloseable {
             t.interrupt(); // releases an accept loop still waiting on the image gate
             try {
                 t.join(MAX_WAIT_S * 1000L);
+                if (eofGate != null && t.isAlive()) {
+                    throw new AssertionError("server EOF relay worker did not terminate: " + t.getName());
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                if (eofGate != null) throw new AssertionError("interrupted joining server EOF relay", e);
                 return;
             }
         }
+        if (eofGate != null) eofGate.checkFailure();
     }
 }

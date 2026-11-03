@@ -530,12 +530,72 @@ class ClientServerIntegrationTest {
         HostTestAccess.lifecycle(server).close(new CloseInfo(Packet.DisconnectReason.USER, "test", false)); // closes, no DISCONNECT
         rec.await();
         assertTrue(ms(rec.decidedAtNanos - start) < 500, "EOF must close the client at once, not after liveness");
-        // EOF or, if a PING was unread when the server closed, a reset: either way an EOF cause, never a timeout
+        // Both channels close; the first reader to observe EOF or a reset owns the close cause.
         assertNotEquals(Packet.DisconnectReason.TIMEOUT, rec.info.reason());
-        assertTrue(java.util.Set.of("peer closed command channel", "command channel lost").contains(rec.info.message()),
-                rec.info.message());
+        assertChannelEofCause(rec.info);
         awaitTerminated(c);
         c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+        assertSame(rec.info, c.socketsClosed().get(WAIT_S, TimeUnit.SECONDS));
+        assertSame(rec.info, c.lifecycle().closeInfo().orElseThrow());
+    }
+
+    private static void assertChannelEofCause(CloseInfo info) {
+        assertFalse(info.sendDisconnect());
+        assertTrue(java.util.Set.of(
+                new CloseInfo(Packet.DisconnectReason.USER, "peer closed command channel", false),
+                new CloseInfo(Packet.DisconnectReason.USER, "peer closed image channel", false),
+                new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "command channel lost", false),
+                new CloseInfo(Packet.DisconnectReason.PROTOCOL_ERROR, "image channel lost", false)).contains(info),
+                info.toString());
+    }
+
+    @Test
+    void imageEofWinsWhileCommandEofHeldKeepsFirstReason() throws Exception {
+        assertHostEofWinner(RecordingRelay.Lane.IMG, "peer closed image channel");
+    }
+
+    @Test
+    void commandEofWinsWhileImageEofHeldKeepsFirstReason() throws Exception {
+        assertHostEofWinner(RecordingRelay.Lane.CMD, "peer closed command channel");
+    }
+
+    private void assertHostEofWinner(RecordingRelay.Lane winner, String message) throws Exception {
+        HostCore core = core(normal());
+        try (RecordingRelay relay = new RecordingRelay(core, false, false)) {
+            RecordingRelay.ServerEofGate gate = relay.holdServerEof(
+                    winner == RecordingRelay.Lane.CMD ? RecordingRelay.Lane.IMG : RecordingRelay.Lane.CMD);
+            ViewerSession c = client(relay.cmdPort(), relay.imgPort(), core.sessions().currentCode(), normal(),
+                    SocketConnector.DEFAULT, ViewerHooks.none());
+            relay.bind(c);
+            try {
+                c.start();
+                c.activated().get(WAIT_S, TimeUnit.SECONDS);
+                CloseRecorder rec = new CloseRecorder(c);
+                HostSession host = core.sessions().current().orElseThrow();
+                long start = System.nanoTime();
+                HostTestAccess.lifecycle(host).close(new CloseInfo(Packet.DisconnectReason.USER, "test", false));
+                gate.awaitHeld();
+                rec.await();
+                assertTrue(ms(rec.decidedAtNanos - start) < 500, "EOF must close the client at once, not after liveness");
+                assertNotEquals(Packet.DisconnectReason.TIMEOUT, rec.info.reason());
+                assertChannelEofCause(rec.info);
+                assertEquals(new CloseInfo(Packet.DisconnectReason.USER, message, false), rec.info);
+                gate.release();
+                awaitTerminated(c);
+                c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+                assertSame(rec.info, c.socketsClosed().get(WAIT_S, TimeUnit.SECONDS));
+                assertSame(rec.info, c.lifecycle().closeInfo().orElseThrow());
+                host.socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
+                host.terminated().get(WAIT_S, TimeUnit.SECONDS);
+                host.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+                assertEquals(0, HostTestAccess.lifecycle(host).liveWorkers());
+            } finally {
+                gate.release();
+                c.cancel();
+                awaitTerminated(c);
+                c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
+            }
+        }
     }
 
     @Test
