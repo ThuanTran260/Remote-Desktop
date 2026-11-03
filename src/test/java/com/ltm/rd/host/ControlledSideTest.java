@@ -2,7 +2,7 @@ package com.ltm.rd.host;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.ClientPhase;
+import com.ltm.rd.viewer.ViewerPhase;
 import com.ltm.rd.common.Channel;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.CommandWriter;
@@ -40,8 +40,8 @@ class ControlledSideTest {
     private CountDownLatch workerGate;
     private final CountDownLatch workerEntered = new CountDownLatch(1);
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    private final SessionLifecycle<ClientPhase> lifecycle = new SessionLifecycle<>(ClientPhase.ATTACHING,
-            ClientPhase.CLOSING, System::nanoTime, Duration.ZERO, scheduler, Runnable::run,
+    private final SessionLifecycle<ViewerPhase> lifecycle = new SessionLifecycle<>(ViewerPhase.ATTACHING,
+            ViewerPhase.CLOSING, System::nanoTime, Duration.ZERO, scheduler, Runnable::run,
             body -> new Thread(() -> {
                 if (workerGate != null && Thread.currentThread().getName().equals("rd-host-prepare")) {
                     workerEntered.countDown();
@@ -58,13 +58,13 @@ class ControlledSideTest {
     private final FakeScreenSource screen = new FakeScreenSource(1920, 1080);
     private final InputExecutor input = new InputExecutor(device, () -> new Rectangle(0, 0, 1920, 1080), 64,
             InputExecutor.defaultThreadFactory(), e -> {});
-    private final LifecyclePort<ClientPhase> port = new LifecyclePort<>(lifecycle, 7, null, System::nanoTime,
+    private final LifecyclePort<ViewerPhase> port = new LifecyclePort<>(lifecycle, 7, null, System::nanoTime,
             new LifecyclePort.Shell<>() {
-                @Override public boolean isActive(ClientPhase phase) { return phase == ClientPhase.ACTIVE; }
-                @Override public boolean isActivationPending(ClientPhase phase) { return phase == ClientPhase.ATTACHING; }
+                @Override public boolean isActive(ViewerPhase phase) { return phase == ViewerPhase.ACTIVE; }
+                @Override public boolean isActivationPending(ViewerPhase phase) { return phase == ViewerPhase.ATTACHING; }
                 @Override public boolean activationExpired(long now) { return expired.get(); }
                 @Override public CommandWriter writer() { return writer; }
-                @Override public void tryActivate(SessionLifecycle.Tx<ClientPhase> tx) { prepared.countDown(); }
+                @Override public void tryActivate(SessionLifecycle.Tx<ViewerPhase> tx) { prepared.countDown(); }
             });
     private FakeInputDevice.Gate gate;
     private final CountDownLatch prepared = new CountDownLatch(1);
@@ -200,7 +200,7 @@ class ControlledSideTest {
             assertEquals(0, hooks.get());
             assertEquals(0, side.senderRuns());
             assertEquals(0, lifecycle.liveWorkers());
-            assertTrue(tx.advance(ClientPhase.ATTACHING, ClientPhase.ACTIVE));
+            assertTrue(tx.advance(ViewerPhase.ATTACHING, ViewerPhase.ACTIVE));
             return null;
         });
         assertEquals(1, hooks.get());
@@ -232,7 +232,7 @@ class ControlledSideTest {
         assertEquals(0, side.releaseAllReceived());
         authenticate(side);
         assertTrue(input.beginSession(7));
-        lifecycle.atomically(tx -> tx.advance(ClientPhase.ATTACHING, ClientPhase.ACTIVE));
+        lifecycle.atomically(tx -> tx.advance(ViewerPhase.ATTACHING, ViewerPhase.ACTIVE));
         port.atomically(stx -> { side.onPacket(stx, Packet.keyPress(17)); return null; });
         assertTrue(device.awaitCall("keyPress:17"));
         port.atomically(stx -> { side.onPacket(stx, Packet.releaseAll()); return null; });

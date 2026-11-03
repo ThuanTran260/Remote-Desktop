@@ -73,7 +73,7 @@ public final class GuiApp {
 
     private static void showServer(AppRuntime runtime, List<String> addresses) {
         try {
-            ServerFrame frame = new ServerFrame(runtime, addresses, () -> exitAfterShutdown(runtime));
+            HostFrame frame = new HostFrame(runtime, addresses, () -> exitAfterShutdown(runtime));
             frame.setVisible(true);
             runtime.startHost(); // a failure shows up as FAILED in the next snapshot
         } catch (Throwable t) {
@@ -83,7 +83,7 @@ public final class GuiApp {
 
     private static void showClient(AppRuntime runtime, String presetHost) {
         try {
-            ClientFrame frame = new ClientFrame(runtime, presetHost, () -> exitAfterShutdown(runtime));
+            ViewerFrame frame = new ViewerFrame(runtime, presetHost, () -> exitAfterShutdown(runtime));
             frame.setVisible(true);
         } catch (Throwable t) {
             rollback(runtime, Messages.forThrowable(t));

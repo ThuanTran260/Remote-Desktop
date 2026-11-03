@@ -6,7 +6,7 @@ import java.awt.image.BufferedImage;
 /**
  * Immutable view of the application for the UI. {@code frame} is never modified after it was
  * published, so the reference may be shared. {@code controlEnabled} and {@code frame} of the
- * Server come from one transaction: enabled implies the frame belongs to {@code inputEpoch}.
+ * Viewer come from one transaction: enabled implies the frame belongs to {@code inputEpoch}.
  */
 public record Snapshot(LaunchOptions.Role role, UiPhase phase, long generation, long inputEpoch, String message,
         String peer, int cmdPort, int imgPort, String code, int screenWidth, int screenHeight,

@@ -63,10 +63,9 @@ Windows Firewall cần cho phép inbound hai cổng tại Host; Viewer không m�
 Host sở hữu SharingBar không nhận focus, mã và nút Dừng. Viewer sở hữu ControlFrame, Hủy trước ACTIVE và Ngắt khi ACTIVE. Đóng cửa sổ điều khiển chỉ ngắt phiên; đóng form chính shutdown runtime. Cleanup chạy nền; kết quả socket/worker/input chưa sạch được cảnh báo trên EDT trước khi thoát.
 
 - `common/`: giao thức, lifecycle, writer, ticker, timeout.
-- `host/`: input, screen sender, Robot adapter.
-- `viewer/`: frame receiver, gate/epoch, control state.
-- `server/`, `client/`: tên vỏ TCP tạm B1, lần lượt phục vụ Host và Viewer; đổi tên cơ học thuộc B2.
-- `ui/`: Controller/Snapshot, runtime, form và capture trên EDT.
+- `host/`: HostCore/HostSession, handshake, input, screen sender, Robot adapter.
+- `viewer/`: ViewerSession, kết nối, frame receiver, gate/epoch, control state.
+- `ui/`: Controller/Snapshot, runtime, HostFrame/ViewerFrame, form state và capture trên EDT.
 
 [Thiết kế Host/Viewer v2](docs/superpowers/specs/2026-11-01-host-viewer-design.md) và [hợp đồng UI/CLI/H2](docs/superpowers/specs/2026-11-02-host-viewer-ui-cli-h2-design.md) là đặc tả hiện hành.
 

@@ -1,11 +1,11 @@
 package com.ltm.rd.ui;
 
 import com.ltm.rd.LaunchOptions;
-import com.ltm.rd.client.ClientConfig;
-import com.ltm.rd.client.ClientHooks;
-import com.ltm.rd.client.ClientPhase;
-import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.client.SocketConnector;
+import com.ltm.rd.viewer.ViewerConfig;
+import com.ltm.rd.viewer.ViewerHooks;
+import com.ltm.rd.viewer.ViewerPhase;
+import com.ltm.rd.viewer.ViewerSession;
+import com.ltm.rd.viewer.SocketConnector;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.CommandWriter;
 import com.ltm.rd.common.Packet;
@@ -17,10 +17,10 @@ import com.ltm.rd.host.AdapterFactory;
 import com.ltm.rd.host.InputDevice;
 import com.ltm.rd.host.InputExecutor;
 import com.ltm.rd.host.ScreenGeometry;
-import com.ltm.rd.server.ServerConfig;
-import com.ltm.rd.server.ServerCore;
-import com.ltm.rd.server.ServerPhase;
-import com.ltm.rd.server.ServerSession;
+import com.ltm.rd.host.HostConfig;
+import com.ltm.rd.host.HostCore;
+import com.ltm.rd.host.HostPhase;
+import com.ltm.rd.host.HostSession;
 import com.ltm.rd.viewer.ControlView;
 import com.ltm.rd.viewer.InputOutcome;
 import java.awt.Rectangle;
@@ -50,7 +50,7 @@ import java.util.regex.Pattern;
  * of a new one.
  *
  * <p>{@link #lock} protects only this class's own fields (slot, flags, counter). While holding it
- * nothing is called on {@code ServerCore}, {@code ClientSession}, {@code InputExecutor}, an adapter
+ * nothing is called on {@code HostCore}, {@code ViewerSession}, {@code InputExecutor}, an adapter
  * or a future's completion; those are read or called after the lock was released. Codes, tokens,
  * keys and images are never logged.
  */
@@ -60,19 +60,19 @@ public final class AppRuntime implements Controller {
     private static final int INPUT_CAPACITY = 256;
 
     /** Test seams; {@link #none()} in production. */
-    record Seams(ClientHooks hooks, SocketConnector connector, UnaryOperator<OutputStream> imageOutputDecorator,
-            Runnable beforeServerStart, Runnable afterServerStart, Runnable beforeSenderStart) {
+    record Seams(ViewerHooks hooks, SocketConnector connector, UnaryOperator<OutputStream> imageOutputDecorator,
+            Runnable beforeHostStart, Runnable afterHostStart, Runnable beforeSenderStart) {
         Seams {
             Objects.requireNonNull(hooks);
             Objects.requireNonNull(connector);
             Objects.requireNonNull(imageOutputDecorator);
-            Objects.requireNonNull(beforeServerStart);
-            Objects.requireNonNull(afterServerStart);
+            Objects.requireNonNull(beforeHostStart);
+            Objects.requireNonNull(afterHostStart);
             Objects.requireNonNull(beforeSenderStart);
         }
 
         static Seams none() {
-            return new Seams(ClientHooks.none(), SocketConnector.DEFAULT, UnaryOperator.identity(), () -> { },
+            return new Seams(ViewerHooks.none(), SocketConnector.DEFAULT, UnaryOperator.identity(), () -> { },
                     () -> { }, () -> { });
         }
     }
@@ -83,7 +83,7 @@ public final class AppRuntime implements Controller {
     private static final class ClientSlot {
         final long generation;
         final String host;
-        ClientSession session; // null until the queued connect attempt is constructed
+        ViewerSession session; // null until the queued connect attempt is constructed
         boolean cancelled;
         boolean ended; // no session will ever exist for this slot (startup failure or cancelled early)
         String failure = "";
@@ -98,7 +98,7 @@ public final class AppRuntime implements Controller {
         }
     }
 
-    private record SlotView(long generation, String host, ClientSession session, boolean cancelled, boolean ended,
+    private record SlotView(long generation, String host, ViewerSession session, boolean cancelled, boolean ended,
             String failure) {}
 
     private final LaunchOptions.Role role;
@@ -119,15 +119,15 @@ public final class AppRuntime implements Controller {
     private final InputExecutor inputExecutor;
     private volatile Throwable lastInputFault;
     private volatile ScreenGeometry boundsSnapshot;
-    private volatile ServerSession faultClosedSession;
+    private volatile HostSession faultClosedSession;
 
     // guarded by lock
     private long generationCounter;
     private ClientSlot slot;
-    private ServerCore core;
+    private HostCore core;
     private ServerState serverState = ServerState.IDLE;
     private String serverMessage = "";
-    private ServerSession observedSession; // the newest Host session observed at reservation
+    private HostSession observedSession; // the newest Host session observed at reservation
     private long observedGeneration;
 
     private AppRuntime(LaunchOptions.Role role, AppConfig cfg, AdapterFactory adapters, Seams seams)
@@ -202,10 +202,10 @@ public final class AppRuntime implements Controller {
 
     // ---- test accessors ------------------------------------------------------------------------
 
-    /** Live ticker registrations: the Client runtime's own ticker or the running ServerCore's. */
+    /** Live ticker registrations: the Client runtime's own ticker or the running HostCore's. */
     int tickerRegistrations() {
         if (role == LaunchOptions.Role.VIEWER) return ticker.registrations();
-        ServerCore c;
+        HostCore c;
         synchronized (lock) {
             c = core;
         }
@@ -216,13 +216,13 @@ public final class AppRuntime implements Controller {
         return inputExecutor;
     }
 
-    Optional<ClientSession> clientSession() {
+    Optional<ViewerSession> viewerSession() {
         synchronized (lock) {
             return Optional.ofNullable(slot == null ? null : slot.session);
         }
     }
 
-    ServerCore serverCore() {
+    HostCore hostCore() {
         synchronized (lock) {
             return core;
         }
@@ -258,9 +258,9 @@ public final class AppRuntime implements Controller {
 
     /** Body on {@code rd-app}: the core is published before it binds, so shutdown always sees it. */
     private void runServerStart(CompletableFuture<Void> result) {
-        ServerCore c = null;
+        HostCore c = null;
         try {
-            c = new ServerCore(new ServerConfig(cfg.bindAddress(), cfg.cmdPort(), cfg.imgPort(), cfg.timeouts(),
+            c = new HostCore(new HostConfig(cfg.bindAddress(), cfg.cmdPort(), cfg.imgPort(), cfg.timeouts(),
                     cfg.nanoClock(), new SecureRandom(), seams.imageOutputDecorator()), inputExecutor, adapters,
                     this::publishBounds, seams.beforeSenderStart(), this::observeSession);
             boolean proceed;
@@ -269,13 +269,13 @@ public final class AppRuntime implements Controller {
                 if (proceed) core = c;
             }
             if (!proceed) throw new IllegalStateException("shutting down");
-            seams.beforeServerStart().run();
+            seams.beforeHostStart().run();
             if (shuttingDown.get()) throw new IllegalStateException("shutting down");
             c.start();
             synchronized (lock) {
                 serverState = ServerState.STARTED;
             }
-            seams.afterServerStart().run();
+            seams.afterHostStart().run();
             result.complete(null);
         } catch (Throwable e) {
             if (c != null) c.close();
@@ -293,12 +293,12 @@ public final class AppRuntime implements Controller {
 
     @Override
     public boolean regenerateCode() {
-        ServerCore c = startedCore();
+        HostCore c = startedCore();
         return !inputFaulted() && c != null && c.sessions().regenerateCode();
     }
 
     /** The running core, or null when this is not a started Server or it is shutting down. */
-    private ServerCore startedCore() {
+    private HostCore startedCore() {
         if (role != LaunchOptions.Role.HOST || shuttingDown.get()) return null;
         synchronized (lock) {
             return serverState == ServerState.STARTED ? core : null;
@@ -309,7 +309,7 @@ public final class AppRuntime implements Controller {
     public SendResult sendInput(long generation, long inputEpoch, Packet inputPacket) {
         if (role != LaunchOptions.Role.VIEWER) return SendResult.WRONG_ROLE;
         if (shuttingDown.get()) return SendResult.SHUTTING_DOWN;
-        ClientSession session = clientSession().orElse(null);
+        ViewerSession session = viewerSession().orElse(null);
         if (session == null) return SendResult.NO_SESSION;
         if (session.generation() != generation) return SendResult.STALE_GENERATION;
         return switch (session.offerInput(inputEpoch, inputPacket)) {
@@ -323,7 +323,7 @@ public final class AppRuntime implements Controller {
     @Override
     public boolean releaseControlInput(long generation) {
         if (role != LaunchOptions.Role.VIEWER || shuttingDown.get()) return false;
-        ClientSession session = clientSession().orElse(null);
+        ViewerSession session = viewerSession().orElse(null);
         return session != null && session.generation() == generation
                 && session.releaseControlInput() == CommandWriter.OfferResult.ACCEPTED;
     }
@@ -367,7 +367,7 @@ public final class AppRuntime implements Controller {
     /** Why a new connect must wait for the previous slot, or null when the slot is free. */
     private ConnectOutcome blockedBy(SlotView v) {
         if (v == null || v.ended()) return null;
-        ClientSession cs = v.session();
+        ViewerSession cs = v.session();
         if (cs == null || !cs.lifecycle().isClosed()) return ConnectOutcome.BUSY;
         if (!(cs.socketsClosed().isDone() && cs.terminated().isDone())) return ConnectOutcome.BUSY;
         return null;
@@ -383,8 +383,8 @@ public final class AppRuntime implements Controller {
                 endCancelled(s);
                 return;
             }
-            ClientConfig clientCfg = new ClientConfig(host, cfg.cmdPort(), cfg.imgPort(), code, cfg.timeouts(), cfg.nanoClock());
-            ClientSession session = new ClientSession(clientCfg, s.generation, seams.connector(), seams.hooks(),
+            ViewerConfig clientCfg = new ViewerConfig(host, cfg.cmdPort(), cfg.imgPort(), code, cfg.timeouts(), cfg.nanoClock());
+            ViewerSession session = new ViewerSession(clientCfg, s.generation, seams.connector(), seams.hooks(),
                     ticker, scheduler, cleanup);
             boolean start;
             synchronized (lock) {
@@ -422,7 +422,7 @@ public final class AppRuntime implements Controller {
     @Override
     public boolean cancel() {
         if (role != LaunchOptions.Role.VIEWER) return false;
-        ClientSession cs;
+        ViewerSession cs;
         synchronized (lock) {
             if (slot == null || slot.ended) return false;
             if (slot.session == null) { // still queued: rd-app will see the flag and create nothing
@@ -436,8 +436,8 @@ public final class AppRuntime implements Controller {
         // the phase only moves forward, so a session that left CONNECTING is caught by a later check
         CloseInfo info = new CloseInfo(Packet.DisconnectReason.USER, "cancelled", true);
         var lifecycle = cs.lifecycle();
-        return lifecycle.closeIf(ClientPhase.CONNECTING, info) || lifecycle.closeIf(ClientPhase.AUTHENTICATING, info)
-                || lifecycle.closeIf(ClientPhase.ATTACHING, info);
+        return lifecycle.closeIf(ViewerPhase.CONNECTING, info) || lifecycle.closeIf(ViewerPhase.AUTHENTICATING, info)
+                || lifecycle.closeIf(ViewerPhase.ATTACHING, info);
     }
 
     // ---- both roles ----------------------------------------------------------------------------
@@ -446,13 +446,13 @@ public final class AppRuntime implements Controller {
     public boolean disconnect() {
         if (shuttingDown.get()) return false;
         if (role == LaunchOptions.Role.HOST) {
-            ServerCore c = startedCore();
-            ServerSession session = c == null ? null : c.sessions().current().orElse(null);
+            HostCore c = startedCore();
+            HostSession session = c == null ? null : c.sessions().current().orElse(null);
             if (session == null || session.closeInfo().isPresent()) return false;
             beforeHostDisconnectClose.run(); // test seam outside both runtime and session locks
             return session.close(new CloseInfo(Packet.DisconnectReason.USER, "disconnected", true));
         }
-        ClientSession cs;
+        ViewerSession cs;
         synchronized (lock) {
             if (slot == null || slot.ended) return false;
             if (slot.session == null) {
@@ -484,7 +484,7 @@ public final class AppRuntime implements Controller {
     }
 
     private Snapshot serverSnapshot() {
-        ServerCore c;
+        HostCore c;
         ServerState state;
         String message;
         synchronized (lock) {
@@ -508,9 +508,9 @@ public final class AppRuntime implements Controller {
         // issues a new code only while no session exists, so a code read with a session absent on both
         // sides belongs to the LISTENING state shown
         String code;
-        ServerSession session;
+        HostSession session;
         while (true) {
-            ServerSession before = c.sessions().current().orElse(null);
+            HostSession before = c.sessions().current().orElse(null);
             code = c.sessions().currentCode();
             session = c.sessions().current().orElse(null);
             if (before == session) break;
@@ -520,8 +520,8 @@ public final class AppRuntime implements Controller {
                     false, TrafficStats.ZERO, Snapshot.Cleanup.NONE);
         }
         Optional<CloseInfo> closed = session.closeInfo();
-        UiPhase phase = closed.isPresent() || session.phase() == ServerPhase.CLOSING ? UiPhase.CLOSING
-                : session.phase() == ServerPhase.ACTIVE ? UiPhase.ACTIVE : UiPhase.RESERVED;
+        UiPhase phase = closed.isPresent() || session.phase() == HostPhase.CLOSING ? UiPhase.CLOSING
+                : session.phase() == HostPhase.ACTIVE ? UiPhase.ACTIVE : UiPhase.RESERVED;
         String shownMessage = closed.map(i -> Messages.forClose(i.reason())).orElse("");
         Snapshot.Cleanup pending = Snapshot.Cleanup.NONE;
         if (closed.isPresent()) {
@@ -546,7 +546,7 @@ public final class AppRuntime implements Controller {
      * Snapshots cannot overwrite it with a projection captured before close. An older session's
      * callback is ignored once a newer reservation has been observed.
      */
-    private void observeSession(ServerSession session) {
+    private void observeSession(HostSession session) {
         long generation = session.generation();
         synchronized (lock) {
             if (generation <= observedGeneration) return;
@@ -573,11 +573,11 @@ public final class AppRuntime implements Controller {
         SlotView v;
         synchronized (lock) { v = slot == null ? null : slot.view(); }
         if (v == null || v.ended()) return blank(UiPhase.IDLE, v == null ? "" : v.failure());
-        ClientSession cs = v.session();
+        ViewerSession cs = v.session();
         if (cs == null) return new Snapshot(role, UiPhase.CONNECTING, v.generation(), 0, "", v.host(),
                 cfg.cmdPort(), cfg.imgPort(), null, 0, 0, null, 0, false, TrafficStats.ZERO, Snapshot.Cleanup.NONE);
         ControlView view = cs.controlView();
-        boolean closed = view.phase() == ClientPhase.CLOSING;
+        boolean closed = view.phase() == ViewerPhase.CLOSING;
         if (closed && cs.socketsClosed().isDone() && cs.terminated().isDone()) return blank(UiPhase.IDLE, closeMessage(cs));
         UiPhase phase = switch (view.phase()) {
             case CONNECTING -> UiPhase.CONNECTING;
@@ -593,7 +593,7 @@ public final class AppRuntime implements Controller {
                 view.frame(), view.framesReceived(), view.controlEnabled(), stats(cs.traffic(), cs.rttNanos()), Snapshot.Cleanup.NONE);
     }
 
-    private static String closeMessage(ClientSession cs) {
+    private static String closeMessage(ViewerSession cs) {
         Optional<Packet.AuthStatus> auth = cs.authFailure();
         if (auth.isPresent()) return Messages.forAuth(auth.get());
         return cs.lifecycle().closeInfo().map(i -> Messages.forClose(i.reason())).orElse("");
@@ -614,9 +614,9 @@ public final class AppRuntime implements Controller {
 
     private void onInputFault(Throwable error) {
         lastInputFault = error;
-        ServerCore c;
+        HostCore c;
         synchronized (lock) { c = core; }
-        ServerSession session = c == null ? null : c.sessions().current().orElse(null);
+        HostSession session = c == null ? null : c.sessions().current().orElse(null);
         if (session == null || session.closeInfo().isPresent()) return;
         synchronized (lock) {
             if (core != c) return;
@@ -661,16 +661,16 @@ public final class AppRuntime implements Controller {
             if (!appStopped) app.shutdownNow(); // interrupt a task stuck in an adapter or a bind
             workersStopped = appStopped; // rd-app counts as a worker, for both roles
             if (role == LaunchOptions.Role.HOST) {
-                ServerCore c;
+                HostCore c;
                 synchronized (lock) {
                     c = core;
                 }
                 if (c != null) {
                     // a session reserved while close() runs is only visible afterwards, so look on both sides
-                    ServerSession before = c.sessions().current().orElse(null);
+                    HostSession before = c.sessions().current().orElse(null);
                     c.closeUntil(deadline);
-                    ServerSession after = c.sessions().current().orElse(null);
-                    for (ServerSession session : new ServerSession[] {before, after == before ? null : after}) {
+                    HostSession after = c.sessions().current().orElse(null);
+                    for (HostSession session : new HostSession[] {before, after == before ? null : after}) {
                         if (session == null) continue;
                         socketsClosed &= session.socketsClosed().isDone();
                         await(session.socketsClosed(), deadline);
@@ -686,7 +686,7 @@ public final class AppRuntime implements Controller {
                     }
                 }
             } else {
-                ClientSession cs;
+                ViewerSession cs;
                 synchronized (lock) {
                     cs = slot == null ? null : slot.session;
                 }

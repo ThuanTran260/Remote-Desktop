@@ -2,11 +2,11 @@ package com.ltm.rd.it;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.ClientConfig;
-import com.ltm.rd.client.ClientHooks;
-import com.ltm.rd.client.ClientPhase;
-import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.client.SocketConnector;
+import com.ltm.rd.viewer.ViewerConfig;
+import com.ltm.rd.viewer.ViewerHooks;
+import com.ltm.rd.viewer.ViewerPhase;
+import com.ltm.rd.viewer.ViewerSession;
+import com.ltm.rd.viewer.SocketConnector;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketType;
@@ -15,11 +15,11 @@ import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.host.FakeInputDevice;
 import com.ltm.rd.host.FakeScreenSource;
 import com.ltm.rd.host.InputExecutor;
-import com.ltm.rd.server.ServerConfig;
-import com.ltm.rd.server.ServerCore;
-import com.ltm.rd.server.ServerPhase;
-import com.ltm.rd.server.ServerSession;
-import com.ltm.rd.server.ServerTestAccess;
+import com.ltm.rd.host.HostConfig;
+import com.ltm.rd.host.HostCore;
+import com.ltm.rd.host.HostPhase;
+import com.ltm.rd.host.HostSession;
+import com.ltm.rd.host.HostTestAccess;
 import java.awt.Rectangle;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -45,7 +45,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 /**
- * Real ClientSession against the real ServerCore, or against a raw PacketIO server where a test
+ * Real ViewerSession against the real HostCore, or against a raw PacketIO server where a test
  * must control exactly when the server speaks. Timeout tests assert the exact close cause and the
  * decision window [deadline, deadline + 600 ms]; terminated() is awaited separately.
  */
@@ -70,22 +70,22 @@ class ClientServerIntegrationTest {
     private final InputExecutor executor = new InputExecutor(device, () -> new Rectangle(0, 0, 1920, 1080), 256,
             InputExecutor.defaultThreadFactory(), t -> {});
     private final AtomicLong generations = new AtomicLong();
-    private final List<ClientSession> clients = new ArrayList<>();
-    private final List<ServerCore> cores = new ArrayList<>();
+    private final List<ViewerSession> clients = new ArrayList<>();
+    private final List<HostCore> cores = new ArrayList<>();
     private final List<RawPeer.Server> rawServers = new ArrayList<>();
     private final List<RawPeer> peers = new ArrayList<>();
     private final List<CountDownLatch> releases = new ArrayList<>();
 
 
-    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources(executor);
+    private final com.ltm.rd.host.HostTestAccess.HostResources hostResources = new com.ltm.rd.host.HostTestAccess.HostResources(executor);
 
     @AfterEach
     void cleanup() throws Exception {
         releases.forEach(CountDownLatch::countDown);
-        for (ClientSession c : clients) c.cancel();
+        for (ViewerSession c : clients) c.cancel();
         for (RawPeer p : peers) p.close();
         for (RawPeer.Server s : rawServers) s.close();
-        for (ServerCore c : cores) c.close();
+        for (HostCore c : cores) c.close();
         executor.shutdownAsync().get(WAIT_S, TimeUnit.SECONDS);
         ticker.close();
         scheduler.shutdownNow();
@@ -116,8 +116,8 @@ class ClientServerIntegrationTest {
         return timeouts(Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofSeconds(3), Duration.ofSeconds(3));
     }
 
-    private ServerCore core(Timeouts t) throws IOException {
-        ServerCore c = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, t, System::nanoTime,
+    private HostCore core(Timeouts t) throws IOException {
+        HostCore c = hostResources.core(new HostConfig(InetAddress.getLoopbackAddress(), 0, 0, t, System::nanoTime,
                 new SecureRandom()));
         cores.add(c);
         c.start();
@@ -135,25 +135,25 @@ class ClientServerIntegrationTest {
         return p;
     }
 
-    private ClientSession client(int cmdPort, int imgPort, String code, Timeouts t, SocketConnector connector,
-            ClientHooks hooks) {
+    private ViewerSession client(int cmdPort, int imgPort, String code, Timeouts t, SocketConnector connector,
+            ViewerHooks hooks) {
         return client(cmdPort, imgPort, code, t, connector, hooks, ticker);
     }
 
-    private ClientSession client(int cmdPort, int imgPort, String code, Timeouts t, SocketConnector connector,
-            ClientHooks hooks, Ticker withTicker) {
-        ClientConfig cfg = new ClientConfig("127.0.0.1", cmdPort, imgPort, code, t, System::nanoTime);
-        ClientSession c = new ClientSession(cfg, generations.incrementAndGet(), connector, hooks, withTicker, scheduler, cleanup);
+    private ViewerSession client(int cmdPort, int imgPort, String code, Timeouts t, SocketConnector connector,
+            ViewerHooks hooks, Ticker withTicker) {
+        ViewerConfig cfg = new ViewerConfig("127.0.0.1", cmdPort, imgPort, code, t, System::nanoTime);
+        ViewerSession c = new ViewerSession(cfg, generations.incrementAndGet(), connector, hooks, withTicker, scheduler, cleanup);
         clients.add(c);
         return c;
     }
 
-    private ClientSession client(ServerCore core, String code, Timeouts t, ClientHooks hooks) {
+    private ViewerSession client(HostCore core, String code, Timeouts t, ViewerHooks hooks) {
         return client(core.cmdPort(), core.imgPort(), code, t, SocketConnector.DEFAULT, hooks);
     }
 
-    private ClientSession client(ServerCore core, Timeouts t) {
-        return client(core, core.sessions().currentCode(), t, ClientHooks.none());
+    private ViewerSession client(HostCore core, Timeouts t) {
+        return client(core, core.sessions().currentCode(), t, ViewerHooks.none());
     }
 
     private static long ms(long nanos) {
@@ -197,7 +197,7 @@ class ClientServerIntegrationTest {
         }
     }
 
-    private void awaitTerminated(ClientSession c) throws Exception {
+    private void awaitTerminated(ViewerSession c) throws Exception {
         c.terminated().get(5, TimeUnit.SECONDS);
         assertEquals(0, c.lifecycle().liveWorkers());
     }
@@ -208,7 +208,7 @@ class ClientServerIntegrationTest {
         volatile long decidedAtNanos;
         volatile CloseInfo info;
 
-        CloseRecorder(ClientSession c) {
+        CloseRecorder(ViewerSession c) {
             c.lifecycle().addCloseHook(() -> {
                 decidedAtNanos = System.nanoTime();
                 info = c.lifecycle().closeInfo().orElse(null);
@@ -245,13 +245,13 @@ class ClientServerIntegrationTest {
 
     @Test
     void clientReachesActiveAndServerSeesScreenInfo() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = client(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = client(core, normal());
         assertTrue(c.start());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        assertEquals(ClientPhase.ACTIVE, c.phase());
-        ServerSession s = core.sessions().current().orElseThrow();
-        assertEquals(ServerPhase.ACTIVE, s.phase());
+        assertEquals(ViewerPhase.ACTIVE, c.phase());
+        HostSession s = core.sessions().current().orElseThrow();
+        assertEquals(HostPhase.ACTIVE, s.phase());
         assertEquals(new Packet.SizePayload(1920, 1080), s.screen().orElseThrow());
         assertEquals(1, core.sessions().current().orElseThrow().inputBeginCount());
         assertEquals(InputExecutor.State.OPEN, executor.state());
@@ -259,15 +259,15 @@ class ClientServerIntegrationTest {
 
     @Test
     void activationBeforeImageHandoverStartsReceiverOnce() throws Exception {
-        ServerCore core = core(normal());
+        HostCore core = core(normal());
         HeldHook afterAttach = new HeldHook();
-        ClientSession c = client(core, core.sessions().currentCode(), normal(),
-                new ClientHooks(afterAttach));
+        ViewerSession c = client(core, core.sessions().currentCode(), normal(),
+                new ViewerHooks(afterAttach));
         c.start();
         await(afterAttach.reached, "ATTACH to be flushed");
-        ServerSession host = core.sessions().current().orElseThrow();
+        HostSession host = core.sessions().current().orElseThrow();
         awaitTrue(c::activationReceived, "SESSION_ACTIVE to arrive");
-        assertEquals(ClientPhase.ATTACHING, c.phase(), "the image channel is not handed over yet");
+        assertEquals(ViewerPhase.ATTACHING, c.phase(), "the image channel is not handed over yet");
         assertEquals(0, c.framesReceived());
         assertEquals(InputExecutor.State.OPEN, executor.state());
         assertEquals(1, host.inputBeginCount());
@@ -285,8 +285,8 @@ class ClientServerIntegrationTest {
     @Test
     void imageHandoverBeforeActivationStartsReceiverOnce() throws Exception {
         RawPeer.Server rs = rawServer();
-        ClientSession c = client(rs.cmdPort(), rs.imgPort(), "123456", normal(), SocketConnector.DEFAULT,
-                ClientHooks.none());
+        ViewerSession c = client(rs.cmdPort(), rs.imgPort(), "123456", normal(), SocketConnector.DEFAULT,
+                ViewerHooks.none());
         c.start();
         byte[] token = token();
         RawPeer cmd = rawAuthOk(rs, token);
@@ -299,22 +299,22 @@ class ClientServerIntegrationTest {
         assertArrayEquals(token, attach.attachPayload().token());
 
         awaitTrue(c::imageChannelReady, "the image hand-over");
-        assertEquals(ClientPhase.ATTACHING, c.phase(), "SESSION_ACTIVE has not been sent yet");
+        assertEquals(ViewerPhase.ATTACHING, c.phase(), "SESSION_ACTIVE has not been sent yet");
         assertEquals(0, c.framesReceived());
         cmd.send(Packet.sessionActive());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        assertEquals(ClientPhase.ACTIVE, c.phase());
+        assertEquals(ViewerPhase.ACTIVE, c.phase());
         assertTrue(c.activationReceived());
     }
 
     @Test
     void cancelBetweenActivationAndHandoverStartsNothing() throws Exception {
-        ServerCore core = core(normal());
+        HostCore core = core(normal());
         HeldHook afterAttach = new HeldHook();
-        ClientSession c = client(core, core.sessions().currentCode(), normal(), new ClientHooks(afterAttach));
+        ViewerSession c = client(core, core.sessions().currentCode(), normal(), new ViewerHooks(afterAttach));
         c.start();
         await(afterAttach.reached, "ATTACH to be flushed");
-        ServerSession host = core.sessions().current().orElseThrow();
+        HostSession host = core.sessions().current().orElseThrow();
         awaitTrue(c::activationReceived, "SESSION_ACTIVE to arrive");
         c.cancel();
         afterAttach.release.countDown();
@@ -332,7 +332,7 @@ class ClientServerIntegrationTest {
     @ParameterizedTest
     @EnumSource(HandshakePoint.class)
     void cancelAtEachHandshakePoint(HandshakePoint point) throws Exception {
-        ClientSession c;
+        ViewerSession c;
         HeldHook afterAttach = new HeldHook();
         switch (point) {
             case DURING_CONNECT -> {
@@ -342,14 +342,14 @@ class ClientServerIntegrationTest {
                     awaitClosed(s);
                     throw new IOException("closed while connecting");
                 };
-                c = client(1, 1, "123456", normal(), blocking, ClientHooks.none());
+                c = client(1, 1, "123456", normal(), blocking, ViewerHooks.none());
                 c.start();
                 await(entered, "connect to start");
             }
             case AFTER_AUTH_SENT -> {
                 RawPeer.Server rs = rawServer();
                 c = client(rs.cmdPort(), rs.imgPort(), "123456", normal(), SocketConnector.DEFAULT,
-                        ClientHooks.none());
+                        ViewerHooks.none());
                 c.start();
                 RawPeer cmd = track(rs.acceptCmd());
                 assertEquals(PacketType.AUTH, cmd.read().type());
@@ -357,16 +357,16 @@ class ClientServerIntegrationTest {
             case AFTER_AUTH_RESULT -> {
                 RawPeer.Server rs = rawServer();
                 c = client(rs.cmdPort(), rs.imgPort(), "123456", normal(), SocketConnector.DEFAULT,
-                        ClientHooks.none());
+                        ViewerHooks.none());
                 c.start();
                 rawAuthOk(rs, token());
-                ClientSession started = c;
-                awaitTrue(() -> started.phase() == ClientPhase.ATTACHING, "ATTACHING");
+                ViewerSession started = c;
+                awaitTrue(() -> started.phase() == ViewerPhase.ATTACHING, "ATTACHING");
             }
             case AFTER_ATTACH_FLUSHED -> {
                 RawPeer.Server rs = rawServer();
                 c = client(rs.cmdPort(), rs.imgPort(), "123456", normal(), SocketConnector.DEFAULT,
-                        new ClientHooks(afterAttach));
+                        new ViewerHooks(afterAttach));
                 c.start();
                 rawAuthOk(rs, token());
                 assertEquals(PacketType.ATTACH, track(rs.acceptImg()).read().type());
@@ -385,15 +385,15 @@ class ClientServerIntegrationTest {
 
     @Test
     void cancelAfterBeginInputBeforeSenderRuns() throws Exception {
-        ServerCore core = core(normal());
+        HostCore core = core(normal());
         HeldHook beforeSender = new HeldHook();
         hostResources.beforeSenderStart = beforeSender;
-        ClientSession c = client(core, core.sessions().currentCode(), normal(), ClientHooks.none());
+        ViewerSession c = client(core, core.sessions().currentCode(), normal(), ViewerHooks.none());
         c.start();
         await(beforeSender.reached, "the sender start point");
-        ServerSession host = core.sessions().current().orElseThrow();
+        HostSession host = core.sessions().current().orElseThrow();
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        assertEquals(ClientPhase.ACTIVE, c.phase());
+        assertEquals(ViewerPhase.ACTIVE, c.phase());
         assertEquals(1, host.inputBeginCount());
         c.cancel();
         beforeSender.release.countDown();
@@ -404,14 +404,14 @@ class ClientServerIntegrationTest {
 
     @Test
     void activatedCompletesBeforeSenderStartHook() throws Exception {
-        ServerCore core = core(normal());
+        HostCore core = core(normal());
         HeldHook beforeSender = new HeldHook();
         hostResources.beforeSenderStart = beforeSender;
-        ClientSession c = client(core, core.sessions().currentCode(), normal(), ClientHooks.none());
+        ViewerSession c = client(core, core.sessions().currentCode(), normal(), ViewerHooks.none());
         c.start();
         await(beforeSender.reached, "the sender start point");
-        ServerSession host = core.sessions().current().orElseThrow();
-        assertEquals(ServerPhase.ACTIVE, host.phase());
+        HostSession host = core.sessions().current().orElseThrow();
+        assertEquals(HostPhase.ACTIVE, host.phase());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
         assertTrue(c.activated().isDone());
         assertFalse(c.activated().isCompletedExceptionally());
@@ -424,9 +424,9 @@ class ClientServerIntegrationTest {
 
     @Test
     void wrongCodeReportedToClient() throws Exception {
-        ServerCore core = core(relaxed());
+        HostCore core = core(relaxed());
         String code = core.sessions().currentCode();
-        ClientSession c = client(core, code.equals("000000") ? "000001" : "000000", relaxed(), ClientHooks.none());
+        ViewerSession c = client(core, code.equals("000000") ? "000001" : "000000", relaxed(), ViewerHooks.none());
         c.start();
         awaitTerminated(c);
         assertEquals(Packet.AuthStatus.WRONG_CODE, c.authFailure().orElseThrow());
@@ -443,15 +443,15 @@ class ClientServerIntegrationTest {
         try (ServerSocket probe = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
             freePort = probe.getLocalPort();
         }
-        ClientSession c = client(freePort, freePort, "123456", normal(), SocketConnector.DEFAULT,
-                ClientHooks.none());
+        ViewerSession c = client(freePort, freePort, "123456", normal(), SocketConnector.DEFAULT,
+                ViewerHooks.none());
         c.start();
         awaitTerminated(c);
         CloseInfo info = c.lifecycle().closeInfo().orElseThrow();
         assertEquals("connect failed", info.message());
         assertEquals(0, c.framesReceived());
         c.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
-        assertEquals(ClientPhase.CLOSING, c.phase());
+        assertEquals(ViewerPhase.CLOSING, c.phase());
     }
 
     @Test
@@ -462,7 +462,7 @@ class ClientServerIntegrationTest {
             awaitClosed(s);
             throw new IOException("closed while connecting");
         };
-        ClientSession c = client(1, 1, "123456", normal(), blocking, ClientHooks.none());
+        ViewerSession c = client(1, 1, "123456", normal(), blocking, ViewerHooks.none());
         c.start();
         await(entered, "connect to start");
         long start = System.nanoTime();
@@ -482,7 +482,7 @@ class ClientServerIntegrationTest {
             SocketConnector.DEFAULT.connect(s, addr, timeoutMs);
             connectedAt.compareAndSet(0, System.nanoTime());
         };
-        ClientSession c = client(rs.cmdPort(), rs.imgPort(), "123456", t, recording, ClientHooks.none());
+        ViewerSession c = client(rs.cmdPort(), rs.imgPort(), "123456", t, recording, ViewerHooks.none());
         CloseRecorder rec = new CloseRecorder(c);
         c.start();
         assertEquals(PacketType.AUTH, track(rs.acceptCmd()).read().type()); // the server then stays silent
@@ -500,8 +500,8 @@ class ClientServerIntegrationTest {
         RawPeer.Server rs = rawServer();
         Timeouts t = timeouts(Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofMillis(600),
                 Duration.ofSeconds(5));
-        ClientSession c = client(rs.cmdPort(), rs.imgPort(), "123456", t, SocketConnector.DEFAULT,
-                ClientHooks.none());
+        ViewerSession c = client(rs.cmdPort(), rs.imgPort(), "123456", t, SocketConnector.DEFAULT,
+                ViewerHooks.none());
         CloseRecorder rec = new CloseRecorder(c);
         c.start();
         RawPeer cmd = track(rs.acceptCmd());
@@ -520,14 +520,14 @@ class ClientServerIntegrationTest {
 
     @Test
     void serverEofWhileActiveClosesClientImmediately() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = client(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = client(core, normal());
         c.start();
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
         CloseRecorder rec = new CloseRecorder(c);
-        ServerSession server = core.sessions().current().orElseThrow();
+        HostSession server = core.sessions().current().orElseThrow();
         long start = System.nanoTime();
-        ServerTestAccess.lifecycle(server).close(new CloseInfo(Packet.DisconnectReason.USER, "test", false)); // closes, no DISCONNECT
+        HostTestAccess.lifecycle(server).close(new CloseInfo(Packet.DisconnectReason.USER, "test", false)); // closes, no DISCONNECT
         rec.await();
         assertTrue(ms(rec.decidedAtNanos - start) < 500, "EOF must close the client at once, not after liveness");
         // EOF or, if a PING was unread when the server closed, a reset: either way an EOF cause, never a timeout
@@ -540,9 +540,9 @@ class ClientServerIntegrationTest {
 
     @Test
     void reconnectWithOldCodeFailsNewCodeWorks() throws Exception {
-        ServerCore core = core(normal());
+        HostCore core = core(normal());
         String oldCode = core.sessions().currentCode();
-        ClientSession first = client(core, oldCode, normal(), ClientHooks.none());
+        ViewerSession first = client(core, oldCode, normal(), ViewerHooks.none());
         first.start();
         first.activated().get(WAIT_S, TimeUnit.SECONDS);
         first.cancel();
@@ -551,24 +551,24 @@ class ClientServerIntegrationTest {
         String newCode = core.sessions().currentCode();
         assertNotEquals(oldCode, newCode);
 
-        ClientSession stale = client(core, oldCode, normal(), ClientHooks.none());
+        ViewerSession stale = client(core, oldCode, normal(), ViewerHooks.none());
         stale.start();
         awaitTerminated(stale);
         assertEquals(Packet.AuthStatus.WRONG_CODE, stale.authFailure().orElseThrow());
 
-        ClientSession fresh = client(core, newCode, normal(), ClientHooks.none());
+        ViewerSession fresh = client(core, newCode, normal(), ViewerHooks.none());
         fresh.start();
         fresh.activated().get(WAIT_S, TimeUnit.SECONDS);
-        assertEquals(ClientPhase.ACTIVE, fresh.phase());
+        assertEquals(ViewerPhase.ACTIVE, fresh.phase());
     }
 
     @Test
     void heldKeyReleasedWhenConnectionDrops() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = client(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = client(core, normal());
         c.start();
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ServerSession host = core.sessions().current().orElseThrow();
+        HostSession host = core.sessions().current().orElseThrow();
         awaitTrue(c::controlEnabled, "the first Viewer frame");
         assertEquals(com.ltm.rd.common.CommandWriter.OfferResult.ACCEPTED, c.offerInput(Packet.keyPress(17)));
         assertTrue(device.awaitCall("keyPress:17"));
@@ -594,7 +594,7 @@ class ClientServerIntegrationTest {
                 SocketConnector.DEFAULT.connect(s, addr, timeoutMs);
                 connectedAt.compareAndSet(0, System.nanoTime());
             };
-            ClientSession c = client(rs.cmdPort(), rs.imgPort(), "123456", t, recording, ClientHooks.none(), stalled);
+            ViewerSession c = client(rs.cmdPort(), rs.imgPort(), "123456", t, recording, ViewerHooks.none(), stalled);
             CloseRecorder rec = new CloseRecorder(c);
             c.start();
             assertEquals(PacketType.AUTH, track(rs.acceptCmd()).read().type()); // the server stays silent
@@ -610,27 +610,27 @@ class ClientServerIntegrationTest {
 
     @Test
     void oldSessionLateCallbacksDoNotTouchTheNewSession() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession a = client(core, normal());
+        HostCore core = core(normal());
+        ViewerSession a = client(core, normal());
         a.start();
         a.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ServerSession oldHost = core.sessions().current().orElseThrow();
+        HostSession oldHost = core.sessions().current().orElseThrow();
         long oldGeneration = oldHost.generation();
         a.cancel();
         awaitTerminated(a);
         oldHost.inputReleased().get(WAIT_S, TimeUnit.SECONDS);
         oldHost.terminated().get(WAIT_S, TimeUnit.SECONDS);
         awaitTrue(() -> core.sessions().current().isEmpty(), "the old slot to release");
-        ClientSession b = client(core, normal());
+        ViewerSession b = client(core, normal());
         b.start();
         b.activated().get(WAIT_S, TimeUnit.SECONDS);
-        assertEquals(ClientPhase.ACTIVE, b.phase());
+        assertEquals(ViewerPhase.ACTIVE, b.phase());
         a.cancel();
         a.tick(System.nanoTime() + TimeUnit.HOURS.toNanos(1));
         oldHost.close(new CloseInfo(Packet.DisconnectReason.USER, "late close", false));
         oldHost.tick(System.nanoTime() + TimeUnit.HOURS.toNanos(1));
         executor.endSession(oldGeneration).get(WAIT_S, TimeUnit.SECONDS);
-        assertEquals(ClientPhase.ACTIVE, b.phase());
+        assertEquals(ViewerPhase.ACTIVE, b.phase());
         assertEquals(InputExecutor.State.OPEN, executor.state());
         assertEquals(1, core.sessions().current().orElseThrow().inputBeginCount());
         awaitTrue(b::controlEnabled, "the new Viewer frame");
@@ -639,7 +639,7 @@ class ClientServerIntegrationTest {
     }
 
     /** Drives a raw server through the handshake until the client is ACTIVE; returns the command peer. */
-    private RawPeer rawActive(RawPeer.Server rs, ClientSession c) throws Exception {
+    private RawPeer rawActive(RawPeer.Server rs, ViewerSession c) throws Exception {
         RawPeer cmd = rawAuthOk(rs, token());
         cmd.send(Packet.screenInfo(1920, 1080));
         RawPeer img = track(rs.acceptImg());
@@ -650,20 +650,20 @@ class ClientServerIntegrationTest {
     }
 
     @Test void activationDeadlineWinsHeldImageHandover() throws Exception {
-        ServerCore core = core(relaxed());
+        HostCore core = core(relaxed());
         com.ltm.rd.common.FakeClock clock = new com.ltm.rd.common.FakeClock();
         Ticker idle = new Ticker(Duration.ofHours(1), clock);
         HeldHook handover = new HeldHook();
-        ClientSession c = new ClientSession(new ClientConfig("127.0.0.1", core.cmdPort(), core.imgPort(),
+        ViewerSession c = new ViewerSession(new ViewerConfig("127.0.0.1", core.cmdPort(), core.imgPort(),
                 core.sessions().currentCode(), relaxed(), clock), generations.incrementAndGet(), SocketConnector.DEFAULT,
-                new ClientHooks(handover), idle, scheduler, cleanup);
+                new ViewerHooks(handover), idle, scheduler, cleanup);
         clients.add(c);
         try {
             c.start();
             await(handover.reached, "ATTACH flushed before local handover");
             awaitTrue(c::activationReceived, "activation received while handover is held");
-            ServerSession host = core.sessions().current().orElseThrow();
-            assertEquals(ClientPhase.ATTACHING, c.phase());
+            HostSession host = core.sessions().current().orElseThrow();
+            assertEquals(ViewerPhase.ATTACHING, c.phase());
             assertFalse(c.imageChannelReady());
             assertEquals(0, c.framesReceived());
             clock.set(relaxed().clientActivation().toNanos());
@@ -681,7 +681,7 @@ class ClientServerIntegrationTest {
 
     @RepeatedTest(20)
     void cancelRacingAuthResultNeverResurrectsViewer() throws Exception {
-        ServerCore core = core(relaxed());
+        HostCore core = core(relaxed());
         for (int point = 0; point < 3; point++) {
             String code = core.sessions().currentCode();
             HeldHook beforeAuth = new HeldHook();
@@ -693,20 +693,20 @@ class ClientServerIntegrationTest {
                     SocketConnector.DEFAULT.connect(socket, address, timeout);
                     if (stage == 0 && address.getPort() == relay.cmdPort()) beforeAuth.run();
                 };
-                ClientSession c = client(relay.cmdPort(), relay.imgPort(), code, relaxed(), connect,
-                        point == 2 ? new ClientHooks(beforeHandover) : ClientHooks.none());
+                ViewerSession c = client(relay.cmdPort(), relay.imgPort(), code, relaxed(), connect,
+                        point == 2 ? new ViewerHooks(beforeHandover) : ViewerHooks.none());
                 relay.bind(c);
                 c.start();
-                ServerSession host = null;
+                HostSession host = null;
                 if (point == 0) await(beforeAuth.reached, "connected before AUTH");
                 else {
                     assertTrue(relay.cmd().await(RecordingRelay.Dir.S2C, PacketType.AUTH_RESULT));
                     host = core.sessions().current().orElseThrow();
-                    if (point == 1) assertEquals(ClientPhase.AUTHENTICATING, c.phase());
+                    if (point == 1) assertEquals(ViewerPhase.AUTHENTICATING, c.phase());
                     else {
                         await(beforeHandover.reached, "OK won but local activation is still held");
                         awaitTrue(c::activationReceived, "activation packet before cancel");
-                        assertEquals(ClientPhase.ATTACHING, c.phase());
+                        assertEquals(ViewerPhase.ATTACHING, c.phase());
                     }
                 }
                 c.cancel();
@@ -740,7 +740,7 @@ class ClientServerIntegrationTest {
 
     @RepeatedTest(20)
     void imageLossRacingActivationClosesBothPeers() throws Exception {
-        ServerCore core = core(relaxed());
+        HostCore core = core(relaxed());
         for (boolean lossFirst : new boolean[] {true, false}) {
             CountDownLatch preparing = new CountDownLatch(1);
             CountDownLatch release = new CountDownLatch(1);
@@ -758,16 +758,16 @@ class ClientServerIntegrationTest {
                 @Override public com.ltm.rd.host.ScreenSource newScreenSource() { return new FakeScreenSource(1920, 1080); }
             };
             try (RecordingRelay relay = new RecordingRelay(core, false, false)) {
-                ClientSession c = client(relay.cmdPort(), relay.imgPort(), core.sessions().currentCode(), relaxed(),
-                        SocketConnector.DEFAULT, ClientHooks.none());
+                ViewerSession c = client(relay.cmdPort(), relay.imgPort(), core.sessions().currentCode(), relaxed(),
+                        SocketConnector.DEFAULT, ViewerHooks.none());
                 relay.bind(c);
                 c.start();
                 assertTrue(preparing.await(WAIT_S, TimeUnit.SECONDS));
                 assertTrue(relay.img().await(RecordingRelay.Dir.C2S, PacketType.ATTACH));
-                ServerSession host = core.sessions().current().orElseThrow();
-                awaitTrue(() -> ServerTestAccess.imageAttached(host), "Host has actually handed over ATTACH before image loss");
+                HostSession host = core.sessions().current().orElseThrow();
+                awaitTrue(() -> HostTestAccess.imageAttached(host), "Host has actually handed over ATTACH before image loss");
                 if (lossFirst) {
-                    assertEquals(ServerPhase.RESERVED, host.phase());
+                    assertEquals(HostPhase.RESERVED, host.phase());
                     relay.closeImageConnections();
                     release.countDown();
                 } else {
@@ -788,7 +788,7 @@ class ClientServerIntegrationTest {
                 assertTrue(host.inputBeginCount() <= 1);
                 assertTrue(host.senderRuns() <= 1);
                 assertFalse(c.controlEnabled());
-                assertEquals(ClientPhase.CLOSING, c.phase());
+                assertEquals(ViewerPhase.CLOSING, c.phase());
                 if (!lossFirst) assertEquals(1, device.log().stream().filter("keyRelease:17"::equals).count());
                 awaitTrue(() -> core.sessions().current().isEmpty(), "the image loss closes the whole Host session");
             } finally { release.countDown(); }
@@ -796,13 +796,13 @@ class ClientServerIntegrationTest {
         hostResources.factory = null;
     }
 
-    private static void dumpImageLossState(ClientSession viewer, ServerSession host, RecordingRelay relay) {
+    private static void dumpImageLossState(ViewerSession viewer, HostSession host, RecordingRelay relay) {
         System.err.println("image-loss state viewer=" + viewer.phase() + ", close=" + viewer.lifecycle().closeInfo()
                 + ", sockets=" + viewer.socketsClosed().isDone() + ", terminated=" + viewer.terminated().isDone()
                 + ", input=" + viewer.inputReleased().isDone() + ", workers=" + viewer.lifecycle().liveWorkers());
         System.err.println("image-loss state host=" + host.phase() + ", close=" + host.closeInfo()
                 + ", sockets=" + host.socketsClosed().isDone() + ", terminated=" + host.terminated().isDone()
-                + ", input=" + host.inputReleased().isDone() + ", image=" + ServerTestAccess.imageAttached(host)
+                + ", input=" + host.inputReleased().isDone() + ", image=" + HostTestAccess.imageAttached(host)
                 + ", relay=" + relay.imageState());
         Thread.getAllStackTraces().forEach((thread, stack) -> {
             if (!thread.getName().startsWith("rd-")) return;
@@ -813,24 +813,24 @@ class ClientServerIntegrationTest {
 
     @Test void relayRecordBeforeAttachForwardIsNotHostHandover() throws Exception {
         com.ltm.rd.common.FakeClock hostClock = new com.ltm.rd.common.FakeClock();
-        ServerCore core = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0,
+        HostCore core = hostResources.core(new HostConfig(InetAddress.getLoopbackAddress(), 0, 0,
                 relaxed(), hostClock, new SecureRandom()));
         cores.add(core);
         core.start();
         try (RecordingRelay relay = new RecordingRelay(core, false, false)) {
             relay.holdAttachForward();
-            ClientSession c = client(relay.cmdPort(), relay.imgPort(), core.sessions().currentCode(), relaxed(),
-                    SocketConnector.DEFAULT, ClientHooks.none());
+            ViewerSession c = client(relay.cmdPort(), relay.imgPort(), core.sessions().currentCode(), relaxed(),
+                    SocketConnector.DEFAULT, ViewerHooks.none());
             relay.bind(c);
             c.start();
             assertTrue(relay.img().await(RecordingRelay.Dir.C2S, PacketType.ATTACH));
-            ServerSession host = core.sessions().current().orElseThrow();
+            HostSession host = core.sessions().current().orElseThrow();
             awaitTrue(() -> host.screen().isPresent(), "Host preparation completed without image handover");
-            assertFalse(ServerTestAccess.imageAttached(host));
+            assertFalse(HostTestAccess.imageAttached(host));
             relay.closeImageConnections();
             relay.openAttachForwardGate();
-            assertEquals(ServerPhase.RESERVED, host.phase());
-            assertEquals(ClientPhase.ATTACHING, c.phase());
+            assertEquals(HostPhase.RESERVED, host.phase());
+            assertEquals(ViewerPhase.ATTACHING, c.phase());
             assertFalse(host.socketsClosed().isDone());
             assertFalse(c.socketsClosed().isDone());
             assertFalse(host.terminated().isDone());

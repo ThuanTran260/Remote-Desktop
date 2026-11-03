@@ -1,12 +1,12 @@
 package com.ltm.rd.it;
 
-import com.ltm.rd.client.ClientSession;
+import com.ltm.rd.viewer.ViewerSession;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.common.PacketIO;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
-import com.ltm.rd.server.ServerCore;
-import com.ltm.rd.server.ServerSession;
+import com.ltm.rd.host.HostCore;
+import com.ltm.rd.host.HostSession;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
@@ -28,7 +28,7 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Test-only TCP relay between a real {@link ClientSession} and a real {@link ServerCore}. It
+ * Test-only TCP relay between a real {@link ViewerSession} and a real {@link HostCore}. It
  * decodes every packet in both directions, records one line per packet per channel, and forwards
  * it unchanged (except for the opt-in ATTACH token tamper). Recording happens before forwarding,
  * so packets that are causally related are always recorded in causal order.
@@ -189,9 +189,9 @@ final class RecordingRelay implements AutoCloseable {
         };
     }
 
-    private final ServerCore core;
-    private final AtomicReference<ClientSession> client = new AtomicReference<>();
-    private final AtomicReference<ServerSession> serverSession = new AtomicReference<>();
+    private final HostCore core;
+    private final AtomicReference<ViewerSession> client = new AtomicReference<>();
+    private final AtomicReference<HostSession> serverSession = new AtomicReference<>();
     private final Trace cmdTrace = new Trace();
     private final Trace imgTrace = new Trace();
     private final CountDownLatch imageGate = new CountDownLatch(1);
@@ -212,7 +212,7 @@ final class RecordingRelay implements AutoCloseable {
      *     {@link #openImageGate()}; the client's connect still succeeds (backlog), nothing reaches the server
      * @param tamperAttachToken when true the first ATTACH is forwarded with a corrupted token
      */
-    RecordingRelay(ServerCore core, boolean holdImage, boolean tamperAttachToken) throws IOException {
+    RecordingRelay(HostCore core, boolean holdImage, boolean tamperAttachToken) throws IOException {
         this.core = core;
         this.tamperAttachToken = tamperAttachToken;
         this.cmdListener = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
@@ -239,7 +239,7 @@ final class RecordingRelay implements AutoCloseable {
     }
 
     /** The client whose phase is sampled for {@code C>S} lines; set once the session exists. */
-    void bind(ClientSession session) {
+    void bind(ViewerSession session) {
         client.set(session);
     }
 
@@ -347,10 +347,10 @@ final class RecordingRelay implements AutoCloseable {
 
     private String phase(Dir dir) {
         if (dir == Dir.C2S) {
-            ClientSession c = client.get();
+            ViewerSession c = client.get();
             return c == null ? "-" : c.phase().name();
         }
-        ServerSession s = serverSession.get();
+        HostSession s = serverSession.get();
         return s == null ? "-" : s.phase().name();
     }
 

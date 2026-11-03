@@ -3,13 +3,13 @@ package com.ltm.rd.ui;
 import static com.ltm.rd.ui.RuntimeTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.ClientSession;
+import com.ltm.rd.viewer.ViewerSession;
 import com.ltm.rd.common.FakeClock;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.host.FakeInputDevice;
 import com.ltm.rd.host.FakeScreenSource;
 import com.ltm.rd.host.InputExecutor;
-import com.ltm.rd.server.ServerSession;
+import com.ltm.rd.host.HostSession;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -68,12 +68,12 @@ class AppRuntimeEndToEndTest {
         final int idleServerTickers;
 
         Rig(LongSupplier serverClock) throws Exception {
-            client = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), adapters);
+            client = AppRuntime.forHost(hostConfig(System::nanoTime, 0, 0), adapters);
             runtimes.add(client);
             get(client.startHost());
             idleServerTickers = client.tickerRegistrations();
             Snapshot listening = client.snapshot();
-            server = AppRuntime.forViewer(clientConfig(listening.cmdPort(), listening.imgPort(), serverClock));
+            server = AppRuntime.forViewer(viewerConfig(listening.cmdPort(), listening.imgPort(), serverClock));
             runtimes.add(server);
             connect();
         }
@@ -86,7 +86,7 @@ class AppRuntimeEndToEndTest {
 
         /** Disconnects and waits until both sides are idle again. */
         void disconnect() throws Exception {
-            ClientSession cs = server.clientSession().orElseThrow();
+            ViewerSession cs = server.viewerSession().orElseThrow();
             assertTrue(server.disconnect());
             get(cs.terminated());
             get(cs.inputReleased());
@@ -171,12 +171,12 @@ class AppRuntimeEndToEndTest {
         await(rig.server, x -> !x.controlEnabled());
 
         assertTrue(rig.server.releaseControlInput(s.generation()), "RELEASE_ALL goes out although the gate is closed");
-        com.ltm.rd.server.ServerSession cs = rig.client.serverCore().sessions().current().orElseThrow();
+        com.ltm.rd.host.HostSession cs = rig.client.hostCore().sessions().current().orElseThrow();
         awaitTrue("two RELEASE_ALL received", () -> cs.releaseAllReceived() >= 2);
         assertEquals(2, cs.releaseAllReceived(), "one for the stall, one for the lost focus");
         assertTrue(device.awaitCall("keyRelease:17"));
         assertEquals(1, device.log().stream().filter("keyRelease:17"::equals).count());
-        assertEquals(1, rig.server.clientSession().orElseThrow().controlReleasesSent());
+        assertEquals(1, rig.server.viewerSession().orElseThrow().controlReleasesSent());
         assertFalse(rig.server.releaseControlInput(s.generation() + 1), "another generation is never released");
         unblock.countDown();
     }
@@ -189,7 +189,7 @@ class AppRuntimeEndToEndTest {
 
     @Test
     void shutdownAsyncReturnsSameFutureWhenRepeated() throws Exception {
-        AppRuntime rt = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), new FakeAdapterFactory());
+        AppRuntime rt = AppRuntime.forHost(hostConfig(System::nanoTime, 0, 0), new FakeAdapterFactory());
         runtimes.add(rt);
         get(rt.startHost());
         CompletableFuture<ShutdownReport> first = rt.shutdownAsync();
@@ -224,7 +224,7 @@ class AppRuntimeEndToEndTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch go = new CountDownLatch(1);
         gates.add(go);
-        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.client.ClientHooks.none(), com.ltm.rd.client.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
+        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.viewer.ViewerHooks.none(), com.ltm.rd.viewer.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
                     entered.countDown();
                     try {
                         go.await();
@@ -232,7 +232,7 @@ class AppRuntimeEndToEndTest {
                         Thread.currentThread().interrupt();
                     }
                 }, () -> { }, () -> { });
-        AppRuntime parked = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), new FakeAdapterFactory(), seams);
+        AppRuntime parked = AppRuntime.forHost(hostConfig(System::nanoTime, 0, 0), new FakeAdapterFactory(), seams);
         runtimes.add(parked);
         CompletableFuture<Void> start = parked.startHost();
         assertTrue(entered.await(WAIT_S, TimeUnit.SECONDS));
@@ -276,7 +276,7 @@ class AppRuntimeEndToEndTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch go = new CountDownLatch(1);
         gates.add(go);
-        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.client.ClientHooks.none(), com.ltm.rd.client.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
+        AppRuntime.Seams seams = new AppRuntime.Seams(com.ltm.rd.viewer.ViewerHooks.none(), com.ltm.rd.viewer.SocketConnector.DEFAULT, UnaryOperator.identity(), () -> {
                     entered.countDown();
                     boolean interrupted = false; // a stuck task: interrupts do not release it
                     while (go.getCount() > 0) {
@@ -288,13 +288,13 @@ class AppRuntimeEndToEndTest {
                     }
                     if (interrupted) Thread.currentThread().interrupt();
                 }, () -> { }, () -> { });
-        AppRuntime stuck = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0, Duration.ofMillis(300)), new FakeAdapterFactory(), seams);
+        AppRuntime stuck = AppRuntime.forHost(hostConfig(System::nanoTime, 0, 0, Duration.ofMillis(300)), new FakeAdapterFactory(), seams);
         runtimes.add(stuck);
         stuck.startHost();
         assertTrue(entered.await(WAIT_S, TimeUnit.SECONDS));
 
         ShutdownReport report = get(stuck.shutdownAsync());
-        assertFalse(report.workersStopped(), "rd-app is still parked inside beforeServerStart");
+        assertFalse(report.workersStopped(), "rd-app is still parked inside beforeHostStart");
         go.countDown();
     }
 }

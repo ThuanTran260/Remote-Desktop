@@ -2,10 +2,10 @@ package com.ltm.rd.it;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.ClientConfig;
-import com.ltm.rd.client.ClientHooks;
-import com.ltm.rd.client.ClientSession;
-import com.ltm.rd.client.SocketConnector;
+import com.ltm.rd.viewer.ViewerConfig;
+import com.ltm.rd.viewer.ViewerHooks;
+import com.ltm.rd.viewer.ViewerSession;
+import com.ltm.rd.viewer.SocketConnector;
 import com.ltm.rd.common.CloseInfo;
 import com.ltm.rd.common.CommandWriter;
 import com.ltm.rd.common.Packet;
@@ -15,10 +15,10 @@ import com.ltm.rd.common.Timeouts;
 import com.ltm.rd.host.FakeInputDevice;
 import com.ltm.rd.host.FakeScreenSource;
 import com.ltm.rd.host.InputExecutor;
-import com.ltm.rd.server.ServerConfig;
-import com.ltm.rd.server.ServerCore;
-import com.ltm.rd.server.ServerSession;
-import com.ltm.rd.server.ServerTestAccess;
+import com.ltm.rd.host.HostConfig;
+import com.ltm.rd.host.HostCore;
+import com.ltm.rd.host.HostSession;
+import com.ltm.rd.host.HostTestAccess;
 import com.ltm.rd.viewer.FrameMonitor;
 import java.awt.Rectangle;
 import java.io.IOException;
@@ -44,7 +44,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * Image stream end to end: real ClientSession and ScreenSender against the real ServerCore over
+ * Image stream end to end: real ViewerSession and ScreenSender against the real HostCore over
  * loopback, with a throttled image socket to produce stalls. Frame stall 600 ms, frame timeout
  * 2 s (10 s where another timeout is under test), image write limit 1.5 s. Every timeout test
  * asserts its exact cause, so a different timeout closing first fails it.
@@ -73,20 +73,20 @@ class ImageStreamIntegrationTest {
     private final AtomicLong generations = new AtomicLong();
     private final FakeScreenSource screen = new FakeScreenSource(1920, 1080);
     private final AtomicReference<ThrottledOutputStream> throttle = new AtomicReference<>();
-    private final List<ClientSession> clients = new ArrayList<>();
-    private final List<ServerCore> cores = new ArrayList<>();
+    private final List<ViewerSession> clients = new ArrayList<>();
+    private final List<HostCore> cores = new ArrayList<>();
     private final List<CountDownLatch> gates = new ArrayList<>();
     private final Set<Thread> threadsAtStart = sessionThreads();
 
 
-    private final com.ltm.rd.server.ServerTestAccess.HostResources hostResources = new com.ltm.rd.server.ServerTestAccess.HostResources(executor);
+    private final com.ltm.rd.host.HostTestAccess.HostResources hostResources = new com.ltm.rd.host.HostTestAccess.HostResources(executor);
 
     @AfterEach
     void teardown() throws Exception {
         gates.forEach(CountDownLatch::countDown);
-        for (ServerCore c : cores) c.close();
-        for (ClientSession c : clients) c.cancel();
-        for (ClientSession c : clients) c.terminated().get(5, TimeUnit.SECONDS);
+        for (HostCore c : cores) c.close();
+        for (ViewerSession c : clients) c.cancel();
+        for (ViewerSession c : clients) c.terminated().get(5, TimeUnit.SECONDS);
         executor.shutdownAsync().get(WAIT_S, TimeUnit.SECONDS);
         ticker.close();
         scheduler.shutdownNow();
@@ -117,8 +117,8 @@ class ImageStreamIntegrationTest {
         return timeouts(Duration.ofSeconds(2));
     }
 
-    private ServerCore core(Timeouts t) throws IOException {
-        ServerCore c = hostResources.core(new ServerConfig(InetAddress.getLoopbackAddress(), 0, 0, t, System::nanoTime,
+    private HostCore core(Timeouts t) throws IOException {
+        HostCore c = hostResources.core(new HostConfig(InetAddress.getLoopbackAddress(), 0, 0, t, System::nanoTime,
                 new SecureRandom(), out -> {
                     ThrottledOutputStream th = new ThrottledOutputStream(out);
                     throttle.set(th);
@@ -131,27 +131,27 @@ class ImageStreamIntegrationTest {
     }
 
     /** Starts a client whose image socket output goes through a throttle (unlimited until a test sets a rate). */
-    private ClientSession startClient(ServerCore core, Timeouts t, FakeScreenSource source) {
+    private ViewerSession startClient(HostCore core, Timeouts t, FakeScreenSource source) {
         hostResources.source = source;
-        ClientConfig cfg = new ClientConfig("127.0.0.1", core.cmdPort(), core.imgPort(),
+        ViewerConfig cfg = new ViewerConfig("127.0.0.1", core.cmdPort(), core.imgPort(),
                 core.sessions().currentCode(), t, System::nanoTime);
-        ClientSession c = new ClientSession(cfg, generations.incrementAndGet(), SocketConnector.DEFAULT, ClientHooks.none(), ticker, scheduler, cleanup);
+        ViewerSession c = new ViewerSession(cfg, generations.incrementAndGet(), SocketConnector.DEFAULT, ViewerHooks.none(), ticker, scheduler, cleanup);
         clients.add(c);
         assertTrue(c.start());
         return c;
     }
 
-    private ClientSession startClient(ServerCore core, Timeouts t) {
+    private ViewerSession startClient(HostCore core, Timeouts t) {
         return startClient(core, t, screen);
     }
 
-    private static ServerSession serverSession(ServerCore core) {
+    private static HostSession serverSession(HostCore core) {
         awaitTrue(() -> core.sessions().current().isPresent(), "the server session");
         return core.sessions().current().orElseThrow();
     }
 
-    private static SessionLifecycle<?> lifecycle(ServerSession s) {
-        return ServerTestAccess.lifecycle(s);
+    private static SessionLifecycle<?> lifecycle(HostSession s) {
+        return HostTestAccess.lifecycle(s);
     }
 
     private static long ms(long nanos) {
@@ -190,7 +190,7 @@ class ImageStreamIntegrationTest {
         }
     }
 
-    private void awaitControl(ClientSession s) {
+    private void awaitControl(ViewerSession s) {
         awaitTrue(s::controlEnabled, "control to be enabled by the first frame");
     }
 
@@ -214,11 +214,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void framesFlowAndControlEnablesAfterFirstFrame() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = startClient(core, normal());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         awaitTrue(() -> s.framesReceived() >= 3, "several frames");
         assertTrue(s.latestFrame().isPresent());
@@ -226,11 +226,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void inputReachesClientDeviceAfterFirstFrame() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = startClient(core, normal());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         assertEquals(CommandWriter.OfferResult.ACCEPTED, s.offerInput(Packet.mousePress(100, 100, 1)));
         assertTrue(device.awaitCall("mouseMove:100,100"));
@@ -241,13 +241,13 @@ class ImageStreamIntegrationTest {
 
     @Test
     void inputRejectedBeforeFirstFrame() throws Exception {
-        ServerCore core = core(wide());
+        HostCore core = core(wide());
         CountDownLatch gate = screen.blockCaptures(); // the first capture, hence the first frame, is held back
         gates.add(gate);
-        ClientSession c = startClient(core, wide());
+        ViewerSession c = startClient(core, wide());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         assertFalse(s.controlEnabled());
         assertEquals(CommandWriter.OfferResult.CLOSED, s.offerInput(Packet.mouseMove(1, 1)));
         gate.countDown();
@@ -257,11 +257,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void downscaledFrameIsAccepted() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = startClient(core, normal());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitTrue(() -> s.latestFrame().isPresent(), "a frame");
         assertEquals(1280, s.latestFrame().orElseThrow().getWidth(), "1920x1080 is sent as 1280x720");
         assertEquals(720, s.latestFrame().orElseThrow().getHeight());
@@ -270,11 +270,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void slowLinkStallsOnceThenRecovers() throws Exception {
-        ServerCore core = core(wide());
-        ClientSession c = startClient(core, wide());
+        HostCore core = core(wide());
+        ViewerSession c = startClient(core, wide());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         assertEquals(CommandWriter.OfferResult.ACCEPTED, s.offerInput(Packet.keyPress(17)));
         assertTrue(device.awaitCall("keyPress:17"));
@@ -304,12 +304,12 @@ class ImageStreamIntegrationTest {
 
     @Test
     void heartbeatAliveButNoFramesTimesOut() throws Exception {
-        ServerCore core = core(normal());
+        HostCore core = core(normal());
         CountDownLatch gate = screen.blockCaptures(); // no frame is ever produced
         gates.add(gate);
-        ClientSession c = startClient(core, normal());
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession c = startClient(core, normal());
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         CloseRecorder rec = new CloseRecorder(s.lifecycle());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
         long activeAt = s.activeAtNanos().orElseThrow(); // the server's own ACTIVE instant, same clock
@@ -327,11 +327,11 @@ class ImageStreamIntegrationTest {
     @Test
     void stuckImageWriteClosesSessionWithTimeout() throws Exception {
         Timeouts t = timeouts(Duration.ofSeconds(10)); // the server's frame timeout must not fire first
-        ServerCore core = core(t);
-        ClientSession c = startClient(core, t);
+        HostCore core = core(t);
+        ViewerSession c = startClient(core, t);
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         CloseRecorder rec = new CloseRecorder(lifecycle(h));
         long stamp = System.nanoTime(); // not later than the start of the write that will be stuck
@@ -349,11 +349,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void screenGeometryChangeClosesWithScreenChanged() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = startClient(core, normal());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         CloseRecorder rec = new CloseRecorder(lifecycle(h));
         long start = System.nanoTime();
@@ -368,11 +368,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void captureFailureClosesWithDisconnectSoTheServerSeesTheReason() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = startClient(core, normal());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         CloseRecorder rec = new CloseRecorder(lifecycle(h));
         screen.failCaptures(true);
@@ -388,11 +388,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void interruptedSenderClosesTheSessionInsteadOfSpinning() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = startClient(core, normal());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         CloseRecorder rec = new CloseRecorder(lifecycle(h));
         Thread sender = sessionThreads().stream()
@@ -410,11 +410,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void wrongRatioFrameIsProtocolError() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = startClient(core, normal());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         CloseRecorder rec = new CloseRecorder(s.lifecycle());
         screen.setCaptureSize(1600, 1280); // 5:4 content while SCREEN_INFO said 16:9, and no geometry change
@@ -429,11 +429,11 @@ class ImageStreamIntegrationTest {
 
     @Test
     void disconnectEndToEndReleasesInputAndSlot() throws Exception {
-        ServerCore core = core(normal());
-        ClientSession c = startClient(core, normal());
+        HostCore core = core(normal());
+        ViewerSession c = startClient(core, normal());
         c.activated().get(WAIT_S, TimeUnit.SECONDS);
-        ClientSession s = c;
-        ServerSession h = serverSession(core);
+        ViewerSession s = c;
+        HostSession h = serverSession(core);
         awaitControl(s);
         assertEquals(CommandWriter.OfferResult.ACCEPTED, s.offerInput(Packet.keyPress(17)));
         assertTrue(device.awaitCall("keyPress:17"));
@@ -449,14 +449,14 @@ class ImageStreamIntegrationTest {
 
     @Test
     void reconnectFiftyTimesReturnsToBaseline() throws Exception {
-        ServerCore core = core(normal());
+        HostCore core = core(normal());
         int serverBaseline = core.tickerRegistrations();
         int clientBaseline = ticker.registrations();
         for (int i = 0; i < 50; i++) {
-            ClientSession c = startClient(core, normal(), new FakeScreenSource(1920, 1080));
+            ViewerSession c = startClient(core, normal(), new FakeScreenSource(1920, 1080));
             c.activated().get(WAIT_S, TimeUnit.SECONDS);
-            ClientSession s = c;
-        ServerSession h = serverSession(core);
+            ViewerSession s = c;
+        HostSession h = serverSession(core);
             awaitControl(s);
             h.disconnect();
             h.terminated().get(5, TimeUnit.SECONDS);

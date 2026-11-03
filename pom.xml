@@ -105,11 +105,11 @@
                 <rule>
                   <element>CLASS</element>
                   <includes>
-                    <include>com.ltm.rd.server.ServerSession</include>
+                    <include>com.ltm.rd.host.HostSession</include>
                     <include>com.ltm.rd.viewer.ControlSide</include>
-                    <include>com.ltm.rd.client.ClientSession</include>
+                    <include>com.ltm.rd.viewer.ViewerSession</include>
                     <include>com.ltm.rd.host.ControlledSide</include>
-                    <include>com.ltm.rd.server.HandshakeHandler</include>
+                    <include>com.ltm.rd.host.HandshakeHandler</include>
                   </includes>
                   <limits>
                     <limit>

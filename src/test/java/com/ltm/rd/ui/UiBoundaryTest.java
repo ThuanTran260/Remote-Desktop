@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
 class UiBoundaryTest {
     private static final Path UI_SOURCES = Path.of("src", "main", "java", "com", "ltm", "rd", "ui");
     private static final Pattern FORBIDDEN =
-            Pattern.compile("\\b(serverCore|inputExecutor|clientSession|tickerRegistrations)\\s*\\(|\\bSeams\\b");
+            Pattern.compile("\\b(hostCore|inputExecutor|viewerSession|tickerRegistrations)\\s*\\(|\\bSeams\\b");
 
     @Test
     void otherUiClassesDoNotUseTheRuntimeTestAccessors() throws IOException {
@@ -38,13 +38,13 @@ class UiBoundaryTest {
 
     @Test
     void auxiliaryWindowsBelongToCorrectRole() throws IOException {
-        String host = Files.readString(UI_SOURCES.resolve("ServerFrame.java"), StandardCharsets.UTF_8);
-        String viewer = Files.readString(UI_SOURCES.resolve("ClientFrame.java"), StandardCharsets.UTF_8);
+        String host = Files.readString(UI_SOURCES.resolve("HostFrame.java"), StandardCharsets.UTF_8);
+        String viewer = Files.readString(UI_SOURCES.resolve("ViewerFrame.java"), StandardCharsets.UTF_8);
         assertTrue(host.contains("new SharingBar("));
         assertFalse(host.contains("ControlFrame"));
         assertTrue(viewer.contains("new ControlFrame("));
         assertFalse(viewer.contains("SharingBar"));
-        Pattern runtimeDetails = Pattern.compile("\\b(Robot|InputExecutor|ServerSession|ClientSession|CompletableFuture)\\b");
+        Pattern runtimeDetails = Pattern.compile("\\b(Robot|InputExecutor|HostSession|ViewerSession|CompletableFuture)\\b");
         assertFalse(runtimeDetails.matcher(host).find());
         assertFalse(runtimeDetails.matcher(viewer).find());
     }

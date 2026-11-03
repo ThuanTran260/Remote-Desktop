@@ -12,7 +12,7 @@ class ClosingWatchTest {
 
     @Test
     void warnsOnlyAfterTwoSecondsInClosing() {
-        Snapshot closing = ClientFormStateTest.client(UiPhase.CLOSING, "");
+        Snapshot closing = ViewerFormStateTest.client(UiPhase.CLOSING, "");
         assertFalse(watch.warning(closing));
         clock.advance(Duration.ofMillis(1999));
         assertFalse(watch.warning(closing));
@@ -22,10 +22,10 @@ class ClosingWatchTest {
 
     @Test
     void leavingClosingResetsTheClock() {
-        Snapshot closing = ClientFormStateTest.client(UiPhase.CLOSING, "");
+        Snapshot closing = ViewerFormStateTest.client(UiPhase.CLOSING, "");
         watch.warning(closing);
         clock.advance(Duration.ofSeconds(5));
-        assertFalse(watch.warning(ClientFormStateTest.client(UiPhase.IDLE, "")));
+        assertFalse(watch.warning(ViewerFormStateTest.client(UiPhase.IDLE, "")));
         assertFalse(watch.warning(closing), "a new closing starts counting again");
         clock.advance(Duration.ofSeconds(2));
         assertTrue(watch.warning(closing));

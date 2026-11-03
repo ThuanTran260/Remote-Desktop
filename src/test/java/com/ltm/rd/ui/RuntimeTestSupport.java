@@ -20,19 +20,19 @@ final class RuntimeTestSupport {
 
     private RuntimeTestSupport() {}
 
-    static AppConfig serverConfig(LongSupplier clock, int cmdPort, int imgPort) {
-        return serverConfig(clock, cmdPort, imgPort, Duration.ofSeconds(20));
+    static AppConfig hostConfig(LongSupplier clock, int cmdPort, int imgPort) {
+        return hostConfig(clock, cmdPort, imgPort, Duration.ofSeconds(20));
     }
 
-    static AppConfig serverConfig(LongSupplier clock, int cmdPort, int imgPort, Duration budget) {
+    static AppConfig hostConfig(LongSupplier clock, int cmdPort, int imgPort, Duration budget) {
         return new AppConfig(LO, cmdPort, imgPort, null, TestTimeouts.relaxed(), clock, budget);
     }
 
-    static AppConfig clientConfig(int cmdPort, int imgPort, LongSupplier clock) {
-        return clientConfig(cmdPort, imgPort, clock, Duration.ofSeconds(20));
+    static AppConfig viewerConfig(int cmdPort, int imgPort, LongSupplier clock) {
+        return viewerConfig(cmdPort, imgPort, clock, Duration.ofSeconds(20));
     }
 
-    static AppConfig clientConfig(int cmdPort, int imgPort, LongSupplier clock, Duration budget) {
+    static AppConfig viewerConfig(int cmdPort, int imgPort, LongSupplier clock, Duration budget) {
         return new AppConfig(LO, cmdPort, imgPort, "127.0.0.1", TestTimeouts.relaxed(), clock, budget);
     }
 

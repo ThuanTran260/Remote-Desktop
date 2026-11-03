@@ -3,12 +3,12 @@ package com.ltm.rd.ui;
 import static com.ltm.rd.ui.RuntimeTestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.ClientSession;
+import com.ltm.rd.viewer.ViewerSession;
 import com.ltm.rd.common.FakeClock;
 import com.ltm.rd.common.Packet;
 import com.ltm.rd.host.FakeInputDevice;
 import com.ltm.rd.host.FakeScreenSource;
-import com.ltm.rd.server.ServerSession;
+import com.ltm.rd.host.HostSession;
 import java.awt.event.FocusEvent;
 import java.awt.event.KeyEvent;
 import java.time.Duration;
@@ -58,11 +58,11 @@ class KeyboardEndToEndIntegrationTest {
         final InputCapture capture;
 
         Rig(LongSupplier serverClock) throws Exception {
-            client = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), adapters);
+            client = AppRuntime.forHost(hostConfig(System::nanoTime, 0, 0), adapters);
             runtimes.add(client);
             get(client.startHost());
             Snapshot listening = client.snapshot();
-            server = AppRuntime.forViewer(clientConfig(listening.cmdPort(), listening.imgPort(), serverClock));
+            server = AppRuntime.forViewer(viewerConfig(listening.cmdPort(), listening.imgPort(), serverClock));
             runtimes.add(server);
             sink = new FakeController(server);
             panel.setSize(960, 540);
@@ -103,12 +103,12 @@ class KeyboardEndToEndIntegrationTest {
             SwingUtilities.invokeAndWait(() -> capture.focusGained(new FocusEvent(panel, FocusEvent.FOCUS_GAINED)));
         }
 
-        ServerSession clientSession() {
-            return client.serverCore().sessions().current().orElseThrow();
+        HostSession hostSession() {
+            return client.hostCore().sessions().current().orElseThrow();
         }
 
-        ClientSession serverSession() {
-            return server.clientSession().orElseThrow();
+        ViewerSession viewerSession() {
+            return server.viewerSession().orElseThrow();
         }
 
         long count(String call) {
@@ -139,14 +139,14 @@ class KeyboardEndToEndIntegrationTest {
         rig.focusLost();
         assertTrue(rig.adapters.device.awaitCall("keyRelease:17"));
         assertEquals(1, rig.count("keyRelease:17"));
-        assertEquals(1, rig.serverSession().controlReleasesSent());
-        awaitTrue("RELEASE_ALL received", () -> rig.clientSession().releaseAllReceived() == 1);
+        assertEquals(1, rig.viewerSession().controlReleasesSent());
+        awaitTrue("RELEASE_ALL received", () -> rig.hostSession().releaseAllReceived() == 1);
     }
 
     @Test
     void networkDropWhileCtrlHeldReleasesOnClient() throws Exception {
         Rig rig = new Rig(System::nanoTime);
-        ServerSession first = rig.clientSession();
+        HostSession first = rig.hostSession();
         rig.key(KeyEvent.KEY_PRESSED, KeyEvent.VK_CONTROL);
         assertTrue(rig.adapters.device.awaitCall("keyPress:17"));
 
@@ -158,7 +158,7 @@ class KeyboardEndToEndIntegrationTest {
 
         rig.connect(); // the next session does not hold the old key
         rig.focusLost();
-        awaitTrue("RELEASE_ALL of the new session", () -> rig.clientSession().releaseAllReceived() == 1);
+        awaitTrue("RELEASE_ALL of the new session", () -> rig.hostSession().releaseAllReceived() == 1);
         rig.sentinel();
         assertEquals(1, rig.count("keyRelease:17"), "nothing was held again");
     }
@@ -193,7 +193,7 @@ class KeyboardEndToEndIntegrationTest {
     @Test
     void queueOverflowWhileKeyHeldStillReleasesKey() throws Exception {
         Rig rig = new Rig(System::nanoTime);
-        ServerSession cs = rig.clientSession();
+        HostSession cs = rig.hostSession();
         rig.key(KeyEvent.KEY_PRESSED, KeyEvent.VK_CONTROL);
         assertTrue(rig.adapters.device.awaitCall("keyPress:17"));
         FakeInputDevice.Gate gate = rig.adapters.device.blockOn("mouseWheel:1");
@@ -218,8 +218,8 @@ class KeyboardEndToEndIntegrationTest {
         rig.focusLost();
         rig.focusGained();
         rig.focusLost();
-        assertEquals(2, rig.serverSession().controlReleasesSent());
-        awaitTrue("both RELEASE_ALL received", () -> rig.clientSession().releaseAllReceived() == 2);
-        assertEquals(2, rig.clientSession().releaseAllReceived());
+        assertEquals(2, rig.viewerSession().controlReleasesSent());
+        awaitTrue("both RELEASE_ALL received", () -> rig.hostSession().releaseAllReceived() == 2);
+        assertEquals(2, rig.hostSession().releaseAllReceived());
     }
 }

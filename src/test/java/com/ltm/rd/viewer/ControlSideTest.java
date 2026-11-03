@@ -1,6 +1,6 @@
 package com.ltm.rd.viewer;
 
-import com.ltm.rd.server.ServerPhase;
+import com.ltm.rd.host.HostPhase;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -27,19 +27,19 @@ import org.junit.jupiter.api.Test;
 class ControlSideTest {
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final List<String> started = new CopyOnWriteArrayList<>();
-    private final SessionLifecycle<ServerPhase> lifecycle = new SessionLifecycle<>(ServerPhase.RESERVED,
-            ServerPhase.CLOSING, () -> 100L, Duration.ZERO, scheduler, Runnable::run,
+    private final SessionLifecycle<HostPhase> lifecycle = new SessionLifecycle<>(HostPhase.RESERVED,
+            HostPhase.CLOSING, () -> 100L, Duration.ZERO, scheduler, Runnable::run,
             body -> new Thread(body) {
                 @Override public synchronized void start() { started.add(getName()); super.start(); }
             });
     private int activations;
-    private final LifecyclePort<ServerPhase> port = new LifecyclePort<>(lifecycle, 7, null, () -> 100L,
+    private final LifecyclePort<HostPhase> port = new LifecyclePort<>(lifecycle, 7, null, () -> 100L,
             new LifecyclePort.Shell<>() {
-                @Override public boolean isActive(ServerPhase p) { return p == ServerPhase.ACTIVE; }
-                @Override public boolean isActivationPending(ServerPhase p) { return p == ServerPhase.RESERVED; }
+                @Override public boolean isActive(HostPhase p) { return p == HostPhase.ACTIVE; }
+                @Override public boolean isActivationPending(HostPhase p) { return p == HostPhase.RESERVED; }
                 @Override public boolean activationExpired(long now) { return false; }
                 @Override public CommandWriter writer() { return null; }
-                @Override public void tryActivate(SessionLifecycle.Tx<ServerPhase> tx) { activations++; }
+                @Override public void tryActivate(SessionLifecycle.Tx<HostPhase> tx) { activations++; }
             });
     private final ControlSide side = new ControlSide(port, Timeouts.DEFAULTS, () -> 100L, false);
 
@@ -86,7 +86,7 @@ class ControlSideTest {
         lifecycle.atomically(raw -> {
             port.atomically(tx -> {
                 receiving.onPacket(tx, Packet.screenInfo(1920, 1080));
-                assertTrue(raw.advance(ServerPhase.RESERVED, ServerPhase.ACTIVE));
+                assertTrue(raw.advance(HostPhase.RESERVED, HostPhase.ACTIVE));
                 assertTrue(receiving.onActive(tx, 100L, image));
                 return null;
             });

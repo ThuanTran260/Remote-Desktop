@@ -57,11 +57,11 @@ class MouseEndToEndIntegrationTest {
         final InputCapture capture;
 
         Rig(LongSupplier serverClock) throws Exception {
-            client = AppRuntime.forHost(serverConfig(System::nanoTime, 0, 0), adapters);
+            client = AppRuntime.forHost(hostConfig(System::nanoTime, 0, 0), adapters);
             runtimes.add(client);
             get(client.startHost());
             Snapshot listening = client.snapshot();
-            server = AppRuntime.forViewer(clientConfig(listening.cmdPort(), listening.imgPort(), serverClock));
+            server = AppRuntime.forViewer(viewerConfig(listening.cmdPort(), listening.imgPort(), serverClock));
             runtimes.add(server);
             sink = new FakeController(server);
             panel.setSize(960, 540);

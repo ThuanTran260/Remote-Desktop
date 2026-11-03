@@ -3,7 +3,7 @@ package com.ltm.rd.common;
 import static com.ltm.rd.common.FakeClock.s;
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.ltm.rd.client.ClientPhase;
+import com.ltm.rd.viewer.ViewerPhase;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -149,21 +149,21 @@ class HeartbeatTest {
         assertEquals(5_000_000, hb.lastRttNanos().getAsLong());
     }
 
-    private SessionLifecycle<ClientPhase> lifecycle(ClientPhase phase) {
-        SessionLifecycle<ClientPhase> lc = new SessionLifecycle<>(ClientPhase.CONNECTING, ClientPhase.CLOSING,
+    private SessionLifecycle<ViewerPhase> lifecycle(ViewerPhase phase) {
+        SessionLifecycle<ViewerPhase> lc = new SessionLifecycle<>(ViewerPhase.CONNECTING, ViewerPhase.CLOSING,
                 System::nanoTime, Duration.ofMillis(100), scheduler, cleanup);
-        lc.atomically(tx -> tx.advance(ClientPhase.CONNECTING, phase));
+        lc.atomically(tx -> tx.advance(ViewerPhase.CONNECTING, phase));
         return lc;
     }
 
-    private static void answerPing(SessionLifecycle<ClientPhase> lc, CommandWriter writer, Packet p) {
-        LifecyclePort<ClientPhase> port = new LifecyclePort<>(lc, 1, null, System::nanoTime,
+    private static void answerPing(SessionLifecycle<ViewerPhase> lc, CommandWriter writer, Packet p) {
+        LifecyclePort<ViewerPhase> port = new LifecyclePort<>(lc, 1, null, System::nanoTime,
                 new LifecyclePort.Shell<>() {
-                    @Override public boolean isActive(ClientPhase phase) { return phase == ClientPhase.ACTIVE; }
-                    @Override public boolean isActivationPending(ClientPhase phase) { return phase == ClientPhase.ATTACHING; }
+                    @Override public boolean isActive(ViewerPhase phase) { return phase == ViewerPhase.ACTIVE; }
+                    @Override public boolean isActivationPending(ViewerPhase phase) { return phase == ViewerPhase.ATTACHING; }
                     @Override public boolean activationExpired(long now) { return false; }
                     @Override public CommandWriter writer() { return writer; }
-                    @Override public void tryActivate(SessionLifecycle.Tx<ClientPhase> tx) { }
+                    @Override public void tryActivate(SessionLifecycle.Tx<ViewerPhase> tx) { }
                 });
         port.atomically(stx -> { Heartbeat.answerPing(stx, port, p); return null; });
     }
@@ -174,7 +174,7 @@ class HeartbeatTest {
                 t -> {}, System::nanoTime);
         writers.add(tiny);
         assertEquals(CommandWriter.OfferResult.ACCEPTED, tiny.offer(Packet.ping(1))); // the queue is now full
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ATTACHING);
+        SessionLifecycle<ViewerPhase> lc = lifecycle(ViewerPhase.ATTACHING);
         answerPing(lc, tiny, Packet.ping(2));
         assertEquals(Packet.DisconnectReason.OVERFLOW, lc.closeInfo().orElseThrow().reason());
     }
@@ -197,7 +197,7 @@ class HeartbeatTest {
         CommandWriter w = new CommandWriter(new DataOutputStream(sink), t -> {});
         writers.add(w);
         w.start();
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ATTACHING);
+        SessionLifecycle<ViewerPhase> lc = lifecycle(ViewerPhase.ATTACHING);
         answerPing(lc, w, Packet.ping(42));
         assertTrue(flushed.await(WAIT_S, TimeUnit.SECONDS));
         DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes.toByteArray()));

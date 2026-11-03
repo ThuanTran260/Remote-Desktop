@@ -1,6 +1,6 @@
 package com.ltm.rd.host;
 
-import com.ltm.rd.client.ClientPhase;
+import com.ltm.rd.viewer.ViewerPhase;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -60,21 +60,21 @@ class CommandReceiverTest {
         return new InputExecutor(device, () -> BOUNDS, capacity, InputExecutor.defaultThreadFactory(), t -> {});
     }
 
-    private SessionLifecycle<ClientPhase> lifecycle(ClientPhase phase) {
-        SessionLifecycle<ClientPhase> lc = new SessionLifecycle<>(ClientPhase.CONNECTING, ClientPhase.CLOSING,
+    private SessionLifecycle<ViewerPhase> lifecycle(ViewerPhase phase) {
+        SessionLifecycle<ViewerPhase> lc = new SessionLifecycle<>(ViewerPhase.CONNECTING, ViewerPhase.CLOSING,
                 System::nanoTime, Duration.ofMillis(100), scheduler, cleanup);
-        lc.atomically(tx -> tx.advance(ClientPhase.CONNECTING, phase));
+        lc.atomically(tx -> tx.advance(ViewerPhase.CONNECTING, phase));
         return lc;
     }
 
-    private static void handle(SessionLifecycle<ClientPhase> lc, CommandReceiver receiver, Packet p) {
-        LifecyclePort<ClientPhase> port = new LifecyclePort<>(lc, 1, null, System::nanoTime,
+    private static void handle(SessionLifecycle<ViewerPhase> lc, CommandReceiver receiver, Packet p) {
+        LifecyclePort<ViewerPhase> port = new LifecyclePort<>(lc, 1, null, System::nanoTime,
                 new LifecyclePort.Shell<>() {
-                    @Override public boolean isActive(ClientPhase phase) { return phase == ClientPhase.ACTIVE; }
-                    @Override public boolean isActivationPending(ClientPhase phase) { return phase == ClientPhase.ATTACHING; }
+                    @Override public boolean isActive(ViewerPhase phase) { return phase == ViewerPhase.ACTIVE; }
+                    @Override public boolean isActivationPending(ViewerPhase phase) { return phase == ViewerPhase.ATTACHING; }
                     @Override public boolean activationExpired(long now) { return false; }
                     @Override public CommandWriter writer() { return null; }
-                    @Override public void tryActivate(SessionLifecycle.Tx<ClientPhase> tx) { }
+                    @Override public void tryActivate(SessionLifecycle.Tx<ViewerPhase> tx) { }
                 });
         port.atomically(stx -> {
             receiver.handle(stx, p);
@@ -89,7 +89,7 @@ class CommandReceiverTest {
     @Test
     void pointerOutsideScreenIsProtocolError() {
         assertTrue(executor.beginSession(1));
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
+        SessionLifecycle<ViewerPhase> lc = lifecycle(ViewerPhase.ACTIVE);
         CommandReceiver r = receiver(1);
         handle(lc, r, Packet.mouseMove(1919, 1079)); // last valid pixel
         assertFalse(lc.isClosed());
@@ -101,7 +101,7 @@ class CommandReceiverTest {
     @Test
     void controlBeforeActiveIsProtocolError() throws Exception {
         assertTrue(executor.beginSession(1));
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ATTACHING);
+        SessionLifecycle<ViewerPhase> lc = lifecycle(ViewerPhase.ATTACHING);
         CommandReceiver r = receiver(1);
         handle(lc, r, Packet.keyPress(65));
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, lc.closeInfo().orElseThrow().reason());
@@ -111,7 +111,7 @@ class CommandReceiverTest {
     @Test
     void keyPressMapsToInputCommand() throws Exception {
         assertTrue(executor.beginSession(1));
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
+        SessionLifecycle<ViewerPhase> lc = lifecycle(ViewerPhase.ACTIVE);
         CommandReceiver r = receiver(1);
         handle(lc, r, Packet.keyPress(65));
         assertTrue(device.awaitCall("keyPress:65"));
@@ -127,7 +127,7 @@ class CommandReceiverTest {
     @Test
     void releaseAllIsCountedWhenAccepted() throws Exception {
         assertTrue(executor.beginSession(1));
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
+        SessionLifecycle<ViewerPhase> lc = lifecycle(ViewerPhase.ACTIVE);
         CommandReceiver r = receiver(1);
         assertEquals(0, r.releaseAllReceived());
         handle(lc, r, Packet.keyPress(17));
@@ -135,7 +135,7 @@ class CommandReceiverTest {
         assertEquals(1, r.releaseAllReceived());
         assertTrue(device.awaitCall("keyRelease:17"), "RELEASE_ALL reaches the executor");
 
-        SessionLifecycle<ClientPhase> early = lifecycle(ClientPhase.ATTACHING);
+        SessionLifecycle<ViewerPhase> early = lifecycle(ViewerPhase.ATTACHING);
         CommandReceiver r2 = receiver(1);
         handle(early, r2, Packet.releaseAll());
         assertEquals(0, r2.releaseAllReceived(), "a rejected RELEASE_ALL is not counted");
@@ -148,7 +148,7 @@ class CommandReceiverTest {
         assertTrue(executor.beginSession(1));
         FakeInputDevice.Gate gate = device.blockOn("keyPress:1");
         gates.add(gate);
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
+        SessionLifecycle<ViewerPhase> lc = lifecycle(ViewerPhase.ACTIVE);
         CommandReceiver r = receiver(1);
         handle(lc, r, Packet.keyPress(1));
         assertTrue(gate.awaitEntered(), "the worker is now blocked inside the device");
@@ -160,7 +160,7 @@ class CommandReceiverTest {
 
     @Test
     void staleGenerationClosesSession() {
-        SessionLifecycle<ClientPhase> lc = lifecycle(ClientPhase.ACTIVE);
+        SessionLifecycle<ViewerPhase> lc = lifecycle(ViewerPhase.ACTIVE);
         CommandReceiver r = receiver(7); // the executor never began generation 7
         handle(lc, r, Packet.keyPress(65));
         assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, lc.closeInfo().orElseThrow().reason());
