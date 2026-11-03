@@ -12,6 +12,7 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>21</maven.compiler.release>
+    <surefire.excludedGroups>desktop</surefire.excludedGroups>
   </properties>
 
   <dependencies>
@@ -177,10 +178,45 @@
                If an argLine is ever added here it must contain @{argLine}. -->
           <forkCount>1</forkCount>
           <reuseForks>true</reuseForks>
+          <excludedGroups>${surefire.excludedGroups}</excludedGroups>
           <systemPropertyVariables>
             <java.awt.headless>true</java.awt.headless>
           </systemPropertyVariables>
         </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.pitest</groupId>
+        <artifactId>pitest-maven</artifactId>
+        <version>1.19.6</version>
+        <configuration>
+          <targetClasses>
+            <param>com.ltm.rd.host.HostSession*</param>
+            <param>com.ltm.rd.viewer.ViewerSession*</param>
+            <param>com.ltm.rd.host.HandshakeHandler*</param>
+            <param>com.ltm.rd.viewer.ControlSide*</param>
+            <param>com.ltm.rd.host.ControlledSide*</param>
+          </targetClasses>
+          <excludedGroups>
+            <param>desktop</param>
+          </excludedGroups>
+          <jvmArgs>
+            <param>-Djava.awt.headless=true</param>
+          </jvmArgs>
+          <threads>1</threads>
+          <timestampedReports>false</timestampedReports>
+          <outputFormats>
+            <param>XML</param>
+            <param>HTML</param>
+          </outputFormats>
+          <failWhenNoMutations>true</failWhenNoMutations>
+        </configuration>
+        <dependencies>
+          <dependency>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-junit5-plugin</artifactId>
+            <version>1.2.3</version>
+          </dependency>
+        </dependencies>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -196,4 +232,12 @@
       </plugin>
     </plugins>
   </build>
+  <profiles>
+    <profile>
+      <id>desktop-gate</id>
+      <properties>
+        <surefire.excludedGroups></surefire.excludedGroups>
+      </properties>
+    </profile>
+  </profiles>
 </project>

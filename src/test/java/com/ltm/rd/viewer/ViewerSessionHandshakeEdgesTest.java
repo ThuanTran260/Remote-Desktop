@@ -201,6 +201,7 @@ class ViewerSessionHandshakeEdgesTest {
         RawPeer img = track(rs.acceptImg());
         assertEquals(PacketType.ATTACH, img.read().type());
         assertEquals(ViewerPhase.ACTIVE, c.phase());
+        assertEquals(new Packet.SizePayload(1920, 1080), c.screen().orElseThrow());
     }
 
     @Test void activationDeadlineIncludesCommandHandoverLockWait() throws Exception {

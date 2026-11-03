@@ -896,7 +896,6 @@ class ClientServerIntegrationTest {
             assertFalse(host.terminated().isDone());
             assertFalse(c.terminated().isDone());
             assertEquals(0, host.inputBeginCount());
-            System.out.println("held-forward reproduction: Host RESERVED, Viewer ATTACHING, Host image=false, " + relay.imageState());
             long deadline = host.reservedAtNanos() + relaxed().reserve().toNanos();
             hostClock.set(deadline);
             host.tick(deadline);
