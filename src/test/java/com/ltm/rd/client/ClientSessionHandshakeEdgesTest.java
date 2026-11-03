@@ -390,6 +390,9 @@ class ClientSessionHandshakeEdgesTest {
         RawPeer cmd = acceptAuth(rs);
         cmd.send(Packet.authResult(Packet.AuthStatus.OK, token()));
         assertTrue(beforeImageConnect.reached.await(WAIT_S, TimeUnit.SECONDS));
+        // Fence actual command-writer execution before expecting its final DISCONNECT.
+        cmd.send(Packet.ping(73));
+        assertEquals(73, cmd.readUntil(PacketType.PONG).seq());
         c.cancel();
         beforeImageConnect.release.countDown();
         awaitTerminated(c);
