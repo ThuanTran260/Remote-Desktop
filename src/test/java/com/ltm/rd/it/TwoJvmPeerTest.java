@@ -9,6 +9,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
 /** Headless process/pipe checks; none starts a Host or invokes Robot. */
 @Timeout(30)
@@ -121,7 +123,8 @@ class TwoJvmPeerTest {
     void childProductLoggingAndRawStreamsAreTraceableWithoutPersistedSecrets() throws Exception {
         Path javaExecutable = TwoJvmPeer.javaExecutable();
         Process process = new ProcessBuilder(javaExecutable.toString(), "-Djava.awt.headless=true", "-cp",
-                System.getProperty("surefire.test.class.path"), DiagnosticProcess.class.getName()).start();
+                System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
+                DiagnosticProcess.class.getName()).start();
         try (TwoJvmPeer peer = new TwoJvmPeer("viewer", process, evidence)) {
             peer.awaitEvent("READY", Duration.ofSeconds(10));
         }
@@ -142,6 +145,31 @@ class TwoJvmPeerTest {
                 }
             }
         }
+    }
+
+    @Test
+    @ResourceLock(Resources.SYSTEM_PROPERTIES)
+    void childDiagnosticsWorkWithoutSurefireClasspath() throws Exception {
+        String surefireClasspath = System.getProperty("surefire.test.class.path");
+        try {
+            System.clearProperty("surefire.test.class.path");
+            // Prove the runtime classpath loads a real ordinary child before checking diagnostics.
+            ProcessHandle child;
+            Path runtimeEvidence = Files.createTempDirectory(evidence.getParent(), "runtime-classpath-viewer-");
+            try (TwoJvmPeer peer = TwoJvmPeer.start("viewer", runtimeEvidence)) {
+                child = peer.processHandle();
+                assertEquals("READY viewer", peer.awaitEvent("READY", Duration.ofSeconds(10)));
+            }
+            assertFalse(child.isAlive());
+            assertTrue(Files.readString(runtimeEvidence.resolve("viewer-events.txt"))
+                    .contains("CLEANUP alive=false ioStopped=true pipesDrained=true exit=0"));
+            assertDoesNotThrow(this::childProductLoggingAndRawStreamsAreTraceableWithoutPersistedSecrets,
+                    "the ordinary diagnostic contract must work with the valid runtime classpath");
+        } finally {
+            if (surefireClasspath == null) System.clearProperty("surefire.test.class.path");
+            else System.setProperty("surefire.test.class.path", surefireClasspath);
+        }
+        assertEquals(surefireClasspath, System.getProperty("surefire.test.class.path"));
     }
 
     public static final class DiagnosticProcess {
