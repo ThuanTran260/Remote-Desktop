@@ -265,6 +265,7 @@ class AppRuntimeHostTest {
         var gate = adapters.device.blockOn("keyRelease:17");
         cleanupActions.add(gate::open);
         String code = host.hostCore().sessions().currentCode();
+        var previousViewer = viewer.viewerSession().orElseThrow();
         assertTrue(viewer.disconnect());
         assertTrue(gate.awaitEntered());
         assertSame(session, host.hostCore().sessions().current().orElseThrow());
@@ -280,6 +281,9 @@ class AppRuntimeHostTest {
         get(session.terminated());
         await(host, snap -> snap.phase() == UiPhase.LISTENING);
         assertNotEquals(code, host.snapshot().code());
+        // Host readiness does not imply that the previous Viewer's workers have stopped.
+        get(previousViewer.socketsClosed());
+        get(previousViewer.terminated());
         active(host, viewer);
         assertEquals(2, viewer.snapshot().generation());
     }
