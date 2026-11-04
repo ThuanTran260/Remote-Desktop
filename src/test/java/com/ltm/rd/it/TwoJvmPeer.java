@@ -44,7 +44,7 @@ final class TwoJvmPeer implements AutoCloseable {
     static TwoJvmPeer start(String role, Path evidenceDirectory) throws IOException {
         if (!role.equals("host") && !role.equals("viewer")) throw new IllegalArgumentException("Invalid child role");
         Files.createDirectories(evidenceDirectory);
-        Path java = Path.of(System.getProperty("java.home"), "bin", isWindows() ? "java.exe" : "java");
+        Path java = javaExecutable();
         String classpath = System.getProperty("surefire.test.class.path");
         if (classpath == null) classpath = System.getProperty("java.class.path");
         if (classpath == null || classpath.isBlank()) throw new IllegalStateException("Missing child test/runtime classpath");
@@ -295,7 +295,8 @@ final class TwoJvmPeer implements AutoCloseable {
         }
     }
 
-    private static boolean isWindows() {
-        return System.getProperty("os.name").startsWith("Windows");
+    static Path javaExecutable() {
+        return Path.of(System.getProperty("java.home"), "bin",
+                System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java");
     }
 }

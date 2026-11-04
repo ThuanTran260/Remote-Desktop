@@ -119,7 +119,7 @@ class TwoJvmPeerTest {
 
     @Test
     void childProductLoggingAndRawStreamsAreTraceableWithoutPersistedSecrets() throws Exception {
-        Path javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java.exe");
+        Path javaExecutable = TwoJvmPeer.javaExecutable();
         Process process = new ProcessBuilder(javaExecutable.toString(), "-Djava.awt.headless=true", "-cp",
                 System.getProperty("surefire.test.class.path"), DiagnosticProcess.class.getName()).start();
         try (TwoJvmPeer peer = new TwoJvmPeer("viewer", process, evidence)) {
@@ -170,7 +170,7 @@ class TwoJvmPeerTest {
     }
 
     private TwoJvmPeer probe(boolean eof) throws Exception {
-        Path javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java.exe");
+        Path javaExecutable = TwoJvmPeer.javaExecutable();
         String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
         Process process = new ProcessBuilder(javaExecutable.toString(), "-Djava.awt.headless=true", "-cp", classpath,
                 IgnoringCommandProcess.class.getName(), Boolean.toString(eof)).start();
