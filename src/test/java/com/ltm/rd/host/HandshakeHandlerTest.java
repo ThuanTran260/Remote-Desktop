@@ -22,6 +22,9 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -129,6 +132,80 @@ class HandshakeHandlerTest {
         } catch (IOException ignored) {
             // the test only wants the socket gone
         }
+    }
+
+    @Test
+    void interruptedWrongCodeDelayRestoresFlagAndCleansConnection() throws Exception {
+        Link link = link();
+        pending.add(link.pc());
+        String code = sessions.currentCode();
+        link.send(Packet.auth(code.equals("000000") ? "000001" : "000000"));
+        AtomicBoolean interrupted = new AtomicBoolean();
+        CompletableFuture<Void> returned = new CompletableFuture<>();
+        Thread worker = new Thread(() -> {
+            Thread.currentThread().interrupt();
+            try {
+                new HandshakeHandler(sessions, pending, Timeouts.DEFAULTS, clock,
+                        s -> fail("wrong code cannot reserve"), null, java.util.function.UnaryOperator.identity())
+                        .handle(HandshakeHandler.Kind.COMMAND, link.pc());
+                interrupted.set(Thread.currentThread().isInterrupted());
+                returned.complete(null);
+            } catch (Throwable failure) {
+                returned.completeExceptionally(failure);
+            } finally {
+                Thread.interrupted();
+            }
+        }, "test-interrupted-handshake");
+        worker.start();
+        worker.join(WAIT_MS);
+        assertFalse(worker.isAlive());
+        returned.get(5, TimeUnit.SECONDS);
+        assertTrue(interrupted.get(), "positive wrong-code delay must restore cancellation status");
+        Packet reply = link.receive().orElseThrow();
+        assertEquals(Packet.AuthStatus.WRONG_CODE, reply.authResultPayload().status());
+        assertArrayEquals(new byte[Protocol.TOKEN_LEN], reply.authResultPayload().token());
+        assertTrue(sessions.current().isEmpty());
+        assertTrue(link.pc().socket().isClosed());
+        assertTrue(link.receive().isEmpty());
+    }
+
+    @Test
+    void completedHandshakesAreRemovedFromPendingImmediately() throws Exception {
+        var field = PendingConnections.class.getDeclaredField("connections");
+        field.setAccessible(true);
+        Set<?> entries = (Set<?>) field.get(pending);
+        Link accepted = link();
+        pending.add(accepted.pc());
+        accepted.send(Packet.auth(sessions.currentCode()));
+        handler(clock, s -> { }).handle(HandshakeHandler.Kind.COMMAND, accepted.pc());
+        HostSession owned = sessions.current().orElseThrow();
+        try {
+            assertFalse(entries.contains(accepted.pc()), "successful handover must leave pending immediately");
+            pending.closeAll();
+            assertFalse(accepted.pc().socket().isClosed(), "the session owns the handed-over socket");
+            assertEquals(Packet.AuthStatus.OK, accepted.receive().orElseThrow().authResultPayload().status());
+        } finally {
+            owned.close(new CloseInfo(Packet.DisconnectReason.USER, "fixture release", false));
+            owned.socketsClosed().get(5, TimeUnit.SECONDS);
+            owned.terminated().get(5, TimeUnit.SECONDS);
+            owned.inputReleased().get(5, TimeUnit.SECONDS);
+            sessions.onSessionReleased(owned);
+        }
+        Link eof = link();
+        pending.add(eof.pc());
+        eof.client().shutdownOutput();
+        handler(clock, s -> fail("EOF cannot reserve")).handle(HandshakeHandler.Kind.COMMAND, eof.pc());
+        assertFalse(entries.contains(eof.pc()));
+        assertTrue(eof.pc().socket().isClosed());
+        assertTrue(eof.receive().isEmpty());
+        Link failed = link();
+        pending.add(failed.pc());
+        failed.send(Packet.auth(sessions.currentCode()));
+        handler(clock, s -> closeQuietly(failed.pc().socket())).handle(HandshakeHandler.Kind.COMMAND, failed.pc());
+        assertFalse(entries.contains(failed.pc()));
+        assertTrue(failed.pc().socket().isClosed());
+        assertEquals("handshake failed", sessions.current().orElseThrow().closeInfo().orElseThrow().message());
+        assertTrue(failed.receive().isEmpty());
     }
 
     // ---- end of stream before the first packet -------------------------------------------------

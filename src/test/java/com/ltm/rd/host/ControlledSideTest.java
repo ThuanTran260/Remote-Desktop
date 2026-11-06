@@ -120,6 +120,30 @@ class ControlledSideTest {
         lifecycle.close(new CloseInfo(Packet.DisconnectReason.USER, "test cleanup", false));
     }
 
+    @Test void closingWithoutBeginLeavesExternalSameGenerationOwnerUntouched() throws Exception {
+        assertTrue(input.beginSession(7));
+        gate = device.blockOn("keyPress:17");
+        assertEquals(SubmitResult.ACCEPTED, input.submit(7, new InputCommand.KeyPress(17)));
+        assertTrue(gate.awaitEntered());
+        assertEquals(SubmitResult.ACCEPTED, input.submit(7, new InputCommand.KeyPress(66)));
+        ControlledSide borrowed = side(this::close);
+        try {
+            CompletableFuture<Void> result = borrowed.onClosing();
+            assertTrue(result.isDone(), "an unbegun side cannot borrow the external owner's release future");
+            assertNull(result.join());
+            assertEquals(InputExecutor.State.OPEN, input.state());
+            assertEquals(List.of("keyPress:17"), device.log());
+            assertEquals(SubmitResult.ACCEPTED, input.submit(7, new InputCommand.KeyRelease(66)));
+        } finally {
+            gate.open();
+        }
+        assertTrue(device.awaitCall("keyPress:66"), "the side must leave the external owner's queued input intact");
+        assertTrue(device.awaitCall("keyRelease:66"));
+        input.endSession(7).get(5, TimeUnit.SECONDS);
+        assertEquals(InputExecutor.State.IDLE, input.state());
+        assertTrue(device.log().contains("keyRelease:17"));
+    }
+
     @AfterEach void cleanup() throws Exception {
         if (gate != null) gate.open();
         if (adapterGate != null) adapterGate.countDown();
