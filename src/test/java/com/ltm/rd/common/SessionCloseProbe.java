@@ -23,12 +23,16 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Function;
 
 /** Controlled channel IO and close scheduling shared by the two shell contract suites. */
 public final class SessionCloseProbe {
@@ -73,17 +77,78 @@ public final class SessionCloseProbe {
             Runnable task;
             while ((task = tasks.poll()) != null) task.run();
         }
-        public CompletableFuture<Void> runOneUntilWaitingOrDone() {
-            Runnable task = tasks.remove();
-            CompletableFuture<Void> done = new CompletableFuture<>();
-            Thread worker = new Thread(() -> {
+        public CloseTask startOne() { return new CloseTask(tasks.remove()); }
+    }
+
+    public static final class CloseTask implements AutoCloseable {
+        public final CompletableFuture<Void> done = new CompletableFuture<>();
+        private final Thread worker;
+        private CloseTask(Runnable task) {
+            worker = new Thread(() -> {
                 try { task.run(); done.complete(null); }
                 catch (Throwable failure) { done.completeExceptionally(failure); }
             }, "test-close-phase-b");
             worker.setDaemon(true);
             worker.start();
-            awaitCondition(() -> done.isDone() || worker.getState() == Thread.State.TIMED_WAITING);
-            return done;
+        }
+        @Override public void close() throws Exception {
+            worker.join(5_000);
+            assertFalse(worker.isAlive(), "fixture close task did not terminate");
+            done.get(5, TimeUnit.SECONDS);
+        }
+    }
+
+    /** Observes the installed callback's real stage; controls wait scheduling, not wall-clock grace. */
+    public static final class GracefulWait implements AutoCloseable {
+        private final SessionLifecycle<?> lifecycle;
+        private final CompletableFuture<Void> waiting = new CompletableFuture<>();
+        private final CountDownLatch released = new CountDownLatch(1);
+        private final AtomicBoolean invoked = new AtomicBoolean();
+
+        public GracefulWait(SessionLifecycle<?> lifecycle) {
+            this.lifecycle = lifecycle;
+            lifecycle.atomically(tx -> {
+                @SuppressWarnings("unchecked")
+                Function<CloseInfo, CompletableFuture<?>> original =
+                        (Function<CloseInfo, CompletableFuture<?>>) read(lifecycle, "gracefulStep");
+                assertNotNull(original, "session must have installed its own graceful callback");
+                assertTrue(tx.setGracefulStep(info -> {
+                    assertFalse(invoked.getAndSet(true), "graceful callback invoked twice");
+                    CompletableFuture<?> real = original.apply(info);
+                    return real == null ? null : new ObservedStage(real);
+                }));
+                return null;
+            });
+        }
+
+        public void awaitPendingOrClose(CompletableFuture<?> socketsClosed, CloseTask task) throws Exception {
+            CompletableFuture.anyOf(waiting, socketsClosed, task.done).get(5, TimeUnit.SECONDS);
+        }
+
+        public void release() { released.countDown(); }
+        @Override public void close() { release(); }
+
+        private final class ObservedStage extends CompletableFuture<Object> {
+            private final CompletableFuture<?> real;
+            ObservedStage(CompletableFuture<?> real) {
+                this.real = real;
+                real.whenComplete((value, failure) -> {
+                    if (failure == null) super.complete(value);
+                    else super.completeExceptionally(failure);
+                });
+            }
+
+            @Override public Object get(long timeout, TimeUnit unit)
+                    throws InterruptedException, ExecutionException, TimeoutException {
+                // A missing/already-completed wrong stage never receives an artificial pending gate.
+                if (!real.isDone()) {
+                    assertFalse(lockHeld(lifecycle), "wait observation must run outside the lifecycle lock");
+                    waiting.complete(null);
+                    await(released);
+                }
+                // Start the real timed wait only after inspection, retaining its original arguments.
+                return real.get(timeout, unit);
+            }
         }
     }
 

@@ -211,19 +211,27 @@ class ViewerSessionLifecycleContractTest {
                 wire.output.hold = true;
                 if (!send) assertEquals(CommandWriter.OfferResult.ACCEPTED, writer.offer(Packet.pong(7)));
                 if (!send) await(wire.output.entered);
-                f.session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "test close", send));
-                await(wire.output.entered);
-                CompletableFuture<Void> cleanup = f.cleanup.runOneUntilWaitingOrDone();
-                assertFalse(f.session.socketsClosed().isDone(), "raw close must wait for the held graceful write");
-                assertFalse(wire.socket.isClosed());
-                wire.release();
-                cleanup.get(5, TimeUnit.SECONDS);
-                f.session.terminated().get(5, TimeUnit.SECONDS);
-                List<Packet> packets = wire.packets();
-                assertEquals(2, packets.size());
-                assertEquals(Packet.pong(6), packets.getFirst());
-                assertEquals(send ? PacketType.DISCONNECT : PacketType.PONG, packets.getLast().type());
-                if (send) assertEquals(Packet.DisconnectReason.USER, packets.getLast().disconnectPayload().reason());
+                try (GracefulWait graceful = new GracefulWait(f.session.lifecycle())) {
+                    f.session.lifecycle().close(new CloseInfo(Packet.DisconnectReason.USER, "test close", send));
+                    await(wire.output.entered);
+                    try (CloseTask cleanup = f.cleanup.startOne()) {
+                        try {
+                            graceful.awaitPendingOrClose(f.session.socketsClosed(), cleanup);
+                            assertFalse(f.session.socketsClosed().isDone(), "raw close must wait for the held graceful write");
+                            assertFalse(wire.socket.isClosed());
+                        } finally {
+                            wire.release();
+                            graceful.release();
+                        }
+                        cleanup.done.get(5, TimeUnit.SECONDS);
+                        f.session.terminated().get(5, TimeUnit.SECONDS);
+                        List<Packet> packets = wire.packets();
+                        assertEquals(2, packets.size());
+                        assertEquals(Packet.pong(6), packets.getFirst());
+                        assertEquals(send ? PacketType.DISCONNECT : PacketType.PONG, packets.getLast().type());
+                        if (send) assertEquals(Packet.DisconnectReason.USER, packets.getLast().disconnectPayload().reason());
+                    }
+                }
             }
         }
     }
