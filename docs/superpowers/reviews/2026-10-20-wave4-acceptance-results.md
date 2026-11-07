@@ -2,6 +2,8 @@
 
 Trạng thái: **chưa chạy**. Mẫu kết quả cho task 4.1 và 4.2 trong [kế hoạch đợt 4](../plans/2026-10-20-wave4-hardening-and-release.md). Không dùng số test xanh thay cho tầng 3; ca chưa thực hiện giữ "chưa chạy".
 
+Các trường và bảng gốc bên dưới là mẫu/kết quả v1, giữ nguyên. Lượt v2 được ghi riêng ở cuối file; chưa chạy không phải PASS và không kế thừa kết quả từ SHA/jar v1. Hợp đồng hiện hành: [UI/CLI/H2](../specs/2026-11-02-host-viewer-ui-cli-h2-design.md), mục 3–4; hướng dẫn chạy ở [README](../../../README.md).
+
 Người thực hiện:
 Ngày/giờ:
 Commit (`git rev-parse --short HEAD`):
@@ -57,3 +59,11 @@ Commit (`git rev-parse --short HEAD`):
 Cách đo, loại thao tác, máy và mạng: chưa ghi.
 
 ## Giới hạn và phát hiện còn lại
+
+## Lượt v2 riêng — CHƯA CHẠY
+
+Run/người chạy/thời gian: CHƯA CHẠY. SHA build/final, dirty state, SHA-256 jar A/B, Windows/JDK/resolution/DPI và artifact path: CHƯA CHẠY. Hướng A-Host/B-Viewer: CHƯA CHẠY; hướng B-Host/A-Viewer: CHƯA CHẠY. Không điền PIN/token/phím nhạy cảm vào log/ảnh; che mã. Chỉ đổi verdict khi có kết quả thật và bằng chứng xem lại được.
+
+Tầng 1 tự động, tầng 2 hai JVM và tầng 3 hai máy ghi bằng chứng riêng cùng SHA; không suy PASS giữa các tầng. Mỗi hướng đủ 30 phút ACTIVE và ledger 50 connect/disconnect; focus/DPI/key repeat/shutdown: CHƯA CHẠY. Cắt mạng vật lý H2-11a/b/c (trước connect, sau AUTH trước ACTIVE, ACTIVE giữ input) ghi phase/deadline/mốc gốc/cleanup/reconnect riêng mỗi hướng: CHƯA CHẠY. Raw-peer/harness ghi nhãn tự động riêng, không thay cắt mạng thật. FPS/RTT/CPU/heap và input-to-frame: CHƯA CHẠY; giữ mục tiêu đo cũ, không thêm ngưỡng PASS mới.
+
+Kết quả các gate tự động và giới hạn chung được ghi một nơi ở [báo cáo gate v2](2026-11-02-v2-automated-gates.md); mục này chỉ ghi lượt thử riêng của mẫu.

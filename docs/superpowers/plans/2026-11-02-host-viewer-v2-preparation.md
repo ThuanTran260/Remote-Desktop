@@ -8,9 +8,11 @@
 
 **Tech Stack:** Java 21 target, Swing/Robot, Maven wrapper, JUnit 5, JaCoCo 0.8.16; Orca, Codex Sol và Astra.
 
-**Spec:** `docs/superpowers/specs/2026-11-01-host-viewer-design.md` (mục 1, 2, 3.5 và gate Phần 3–4); `docs/superpowers/reviews/2026-11-02-host-viewer-a1-b0-final-review.md` (pending registration follow-up). Bản thiết kế UI/CLI/H2 mới là đề xuất chờ duyệt, không phải giấy phép triển khai B1.
+**Spec:** `docs/superpowers/specs/2026-11-01-host-viewer-design.md` (mục 1, 2, 3.5 và gate Phần 3–4); `docs/superpowers/reviews/2026-11-02-host-viewer-a1-b0-final-review.md` (pending registration follow-up). Thiết kế UI/CLI/H2 đã được người dùng duyệt để thực thi B1/B2 ngày 2026-11-02; đợt chuẩn bị này chỉ chứng nhận phạm vi Task 1/2.
 
 **Nghiệm thu đợt chuẩn bị (2026-11-02):** Task 1 và Task 2 đã hoàn tất; review cuối Codex `gpt-6-astra` high **PASS / APPROVED**, không có Critical/Important hoặc blocker mới, hai Minor metadata/evidence đã công khai. Code `e58afc7` có một lượt coordinator `clean verify` 912/0/0/0; source không đổi sau đó. [Báo cáo và giới hạn](../reports/2026-11-02-host-viewer-v2-preparation.md). **Người dùng đã duyệt Phần 3–4 để tiếp tục [B1/B2](2026-11-02-host-viewer-b1-b2.md), ghi ở `25b6a53`.**
+
+**Mốc đọc ngày 2026-11-04:** Phần 3–4 và thực thi B1/B2 đã được duyệt; code/refactor đã được nhận theo từng đợt. Trạng thái theo SHA, bằng chứng và các gate còn thiếu nằm ở [báo cáo gate v2 tập trung](../reviews/2026-11-02-v2-automated-gates.md); hướng dẫn chạy hiện hành nằm ở [README](../../../README.md). Không suy từ phê duyệt thiết kế hoặc lịch sử v1 thành nghiệm thu đủ GĐ2.
 
 ## Global Constraints
 
@@ -22,7 +24,7 @@
 - Worker thực thi dùng `gpt-6.1-sol`, effort theo task; review cuối `gpt-6-astra`. Không dùng Luna, model rẻ hơn hoặc Claude. Kiểm `launch.effective`, không đổi config toàn cục.
 - Không tạo helper agent. Chỉ dùng lifecycle Orca, xác thực Task/Dispatch trước xử lý báo cáo và release trước ack. Mọi claim phải gắn với SHA và bằng chứng.
 - B1/B2 chỉ bắt đầu khi Phần 3–4 được trình bày và duyệt. H2 cần hai máy thật; không đánh dấu PASS bằng test headless. PIT/500 race thuộc SHA v2 cuối, chưa chạy trong đợt chuẩn bị này.
-- Khi quota còn khoảng 5%, dừng việc mới và ghi checkpoint đầy đủ; sau reset chỉ tiếp tục khi người dùng nói “bắt đầu”. Worker mới phải nhận quy tắc này, hoàn tất điểm dừng an toàn và báo trạng thái chưa kiểm chứng nếu bị ngắt giữa review.
+- Chỉ dẫn người dùng mới nhất bỏ ngưỡng dừng 5%: tiếp tục công việc được giao bất kể tỷ lệ hiển thị, lưu artifact tăng dần; dùng Codex `gpt-6.1-sol` với effort theo độ khó và `gpt-6-astra` cho review cuối, không đổi sang Luna/model rẻ hơn/Claude. Nếu provider thực sự từ chối thì ghi nguyên nhân và trạng thái chưa kiểm chứng trung thực. **Cập nhật 2026-11-07:** riêng phần đóng gói (closeout), người dùng duyệt worker thực thi là Claude `sonnet`; review cuối vẫn là `gpt-6-astra`, chưa chạy ([báo cáo gate v2](../reviews/2026-11-02-v2-automated-gates.md)).
 
 ## Review Focus
 
@@ -78,6 +80,6 @@
 - Wave đầu: Task 1 Sol high và Task 2 Sol high chạy song song, ghi file không chồng nhau.
 - Sau Task 1: reviewer Sol xhigh chỉ đọc fixed diff; coordinator chạy một `clean verify` trên SHA code đã commit. Hai gate đều đạt mới nghiệm thu. Một người sở hữu target; không lặp suite khi chưa có thay đổi/lỗi mới.
 - Sau Task 2: builder/reviewer Sol high kiểm tính đủ để triển khai, spec compliance và clean boundaries; không triển khai UI. Sửa mọi điểm material bằng một Dispatch sửa draft trước khi đưa người dùng.
-- Coordinator tích hợp docs đã review, đồng bộ trạng thái C0–B0 và provider mới, ghi rõ B1/B2 chờ duyệt. Không sửa source thay worker.
+- Coordinator tích hợp docs đã review, đồng bộ trạng thái C0–B0 và provider mới, ghi rõ trạng thái chờ duyệt tại bàn giao Task 2 là lịch sử; quyết định duyệt sau đó nằm ở phần nghiệm thu đầu tài liệu. Không sửa source thay worker.
 - Final reviewer Astra high xét toàn range và giới hạn nghiệm thu. Nếu có finding material: một fix wave và một re-review scoped; không tự waive finding vì model hoặc test count.
 - Cuối đợt: lưu receipt/report/log/coverage và ledger, báo kết quả từng task; giữ branch. Không lặp thao tác xóa scratch đã bị automatic approval review chặn ở đợt trước.

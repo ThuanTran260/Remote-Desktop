@@ -41,15 +41,19 @@ Worker Sol high đã giao [đề xuất Phần 3–4](../specs/2026-11-02-host-v
 
 Cú pháp đã duyệt là `--role host|viewer` và `--address`, từ chối cờ v1 với hướng dẫn migration theo đúng vai máy. Host tự lắng nghe/hiện IP và mã; Viewer nhập địa chỉ/mã; SharingBar thuộc Host, ControlFrame thuộc Viewer. ControlView đổi sang `client.ClientPhase` cùng producer/consumer/UI/test ngay B1; B2 chỉ rename sang `viewer.ViewerPhase`. H2 ghi rõ cắt mạng trước và sau AUTH/ACTIVE, deadline theo phase, hai hướng máy và CHƯA CHẠY khi thiếu bằng chứng. Thiết kế **đã được người dùng duyệt**; source tại bàn giao vẫn v1, chưa có lệnh v2 hoặc kết quả H2.
 
+**Phạm vi theo thời điểm:** mô tả source v1 và “chưa triển khai B1/B2” trong báo cáo là trạng thái lúc bàn giao đợt chuẩn bị. Các gate v2 được ghi riêng theo SHA thực tế; không dùng kết quả e58afc7 làm nghiệm thu source v2.
+
+**Mốc đọc ngày 2026-11-04:** Phần 3–4 và thực thi B1/B2 đã được duyệt; code/refactor đã được nhận theo từng đợt. Trạng thái theo SHA, bằng chứng và các gate còn thiếu nằm ở [báo cáo gate v2 tập trung](../reviews/2026-11-02-v2-automated-gates.md); hướng dẫn chạy hiện hành nằm ở [README](../../../README.md). Không suy từ phê duyệt thiết kế hoặc lịch sử v1 thành nghiệm thu đủ GĐ2.
+
 ## Quyền sở hữu và việc còn lại
 
 Worker code và designer chạy song song, chỉ worker code được ghi source/index/HEAD/target. Reviewer chỉ đọc, coordinator sở hữu một lượt full verify; designer chỉ ghi artifact riêng. Các Dispatch đã hoàn tất được release trước ack; terminal người dùng tiếp quản được giữ theo receipt.
 
 Gate Task 1, builder/re-review Task 2, review toàn đợt Astra và phê duyệt người dùng Phần 3–4 đều đã đạt. **Bước kế tiếp là [plan và thực thi B1/B2](../plans/2026-11-02-host-viewer-b1-b2.md).** PIT/500 race trên SHA v2 cuối, hai JVM và H2 hai máy Windows thật còn là gate sau; không được thay bằng các test headless trong đợt này. Pending ticker của cấu hình mặc định đã xử lý trong SHA nêu trên; nhận định chưa xử lý ở báo cáo A1–B0 là lịch sử của SHA cũ.
 
-Theo chỉ dẫn mới, khi quota còn khoảng 5% phải ghi checkpoint và dừng; sau reset không tự chạy, chỉ tiếp tục khi người dùng nói “bắt đầu”. Checkpoint ghi rõ review/gate nào còn thiếu, không đổi chúng thành PASS để kết thúc phiên.
+Chỉ dẫn người dùng mới nhất bỏ ngưỡng dừng 5%: tiếp tục công việc được giao bất kể tỷ lệ hiển thị, lưu artifact tăng dần; dùng Codex `gpt-6.1-sol` với effort theo độ khó và `gpt-6-astra` cho review cuối, không đổi sang Luna/model rẻ hơn/Claude. Nếu provider thực sự từ chối thì ghi nguyên nhân và trạng thái chưa kiểm chứng trung thực. **Cập nhật 2026-11-07:** riêng phần đóng gói (closeout), người dùng duyệt worker thực thi là Claude `sonnet`; review cuối vẫn là `gpt-6-astra`, chưa chạy ([báo cáo gate v2](../reviews/2026-11-02-v2-automated-gates.md)).
 
-Lịch sử quota: đã checkpoint khi CLI xuống 5%; người dùng nói “continue” sau reset, Run được nối lại với terminal coordinator mới và Astra hoàn tất review. [Checkpoint mới nhất](../checkpoints/2026-11-02-host-viewer-v2-preparation.md) ghi gate đã đóng và gate còn thiếu. Không tự chạy lại sau một lần dừng quota tiếp theo; không triển khai B1/B2 từ riêng lời resume quota.
+Lịch sử quota: đã checkpoint khi CLI xuống 5%; người dùng nói “continue” sau reset, Run được nối lại với terminal coordinator mới và Astra hoàn tất review. [Checkpoint mới nhất](../checkpoints/2026-11-02-host-viewer-v2-preparation.md) ghi gate đã đóng và gate còn thiếu. Đây là lịch sử đợt chuẩn bị; chỉ dẫn quota hiện hành nằm ở đoạn trên. Quyền thực thi B1/B2 đến từ phê duyệt riêng đã ghi ở đầu báo cáo.
 
 ## Coordinator rulings (ordered ledger extract)
 

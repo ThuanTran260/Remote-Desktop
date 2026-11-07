@@ -8,6 +8,10 @@
 - Bản sửa 3: đã áp dụng góp ý của vòng review thứ 3 và thiết kế lại `InputExecutor`, `CommandWriter`, `Session` theo hướng module sâu (deep module): interface nhỏ, các quy tắc thứ tự, khóa và deadline nằm gọn bên trong module
 - Công nghệ: JDK 21, Maven, Socket TCP (blocking I/O), `java.awt.Robot`, Swing, JUnit 5 (chỉ để test)
 
+**Phạm vi lịch sử v1.** Các vai Server/Client, CLI ở §1.2, luồng §1.4, bảng §2.4 và UI/Robot §3–4 bên dưới được giữ để truy vết v1. Thiết kế thay thế đã duyệt: [Host/Viewer](2026-11-01-host-viewer-design.md), mục 1–2, và [UI/CLI/H2](2026-11-02-host-viewer-ui-cli-h2-design.md), mục 3–4. Host bị điều khiển/lắng nghe/hiện IP-mã/SharingBar; Viewer kết nối/nhận ảnh/gửi input/ControlFrame. Không dùng lệnh v1 với jar v2. Nghiệm thu v2 giữ các tiêu chí áp dụng của §5.2 và bổ sung hai hướng theo H2 đã duyệt; không kế thừa PASS v1.
+
+**Mốc đọc ngày 2026-11-04:** Phần 3–4 và thực thi B1/B2 đã được duyệt; code/refactor đã được nhận theo từng đợt. Trạng thái theo SHA, bằng chứng và các gate còn thiếu nằm ở [báo cáo gate v2 tập trung](../reviews/2026-11-02-v2-automated-gates.md); hướng dẫn chạy hiện hành nằm ở [README](../../../README.md). Không suy từ phê duyệt thiết kế hoặc lịch sử v1 thành nghiệm thu đủ GĐ2.
+
 ---
 
 ## 0. Mục tiêu và phạm vi

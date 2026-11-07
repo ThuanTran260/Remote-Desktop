@@ -12,7 +12,9 @@ Ngày: 2026-11-01. Branch: `feat/wave3-4-desktop-v1`. Thay thế quy ước vai 
 | 3 | Giao diện và CLI (tên cửa sổ, cờ dòng lệnh) | [Thiết kế đã qua builder/re-review và final Astra](2026-11-02-host-viewer-ui-cli-h2-design.md), **người dùng duyệt để tiếp tục B1/B2 ngày 2026-11-02**. |
 | 4 | Tài liệu, lịch, nghiệm thu H2 | Cùng thiết kế Phần 3–4 ở trên, **đã duyệt** ma trận hai hướng và tiêu chí bằng chứng; chưa có kết quả H2 v2, máy/người/lịch thực tế được xác nhận khi chạy. |
 
-Định tuyến hiện hành theo người dùng: thực thi dùng Codex `gpt-6.1-sol`, effort theo độ khó; review cuối được phép dùng `gpt-6-astra`, không dùng Luna/model rẻ hơn hoặc giao thêm Claude. Các tên Sonnet trong lịch sử thiết kế bên dưới là định tuyến cũ. Khi quota còn khoảng 5%, lưu checkpoint và dừng; sau reset chỉ tiếp tục khi người dùng nói “bắt đầu”.
+**Mốc đọc ngày 2026-11-04:** Phần 3–4 và thực thi B1/B2 đã được duyệt; code/refactor đã được nhận theo từng đợt. Trạng thái theo SHA, bằng chứng và các gate còn thiếu nằm ở [báo cáo gate v2 tập trung](../reviews/2026-11-02-v2-automated-gates.md); hướng dẫn chạy hiện hành nằm ở [README](../../../README.md). Không suy từ phê duyệt thiết kế hoặc lịch sử v1 thành nghiệm thu đủ GĐ2. Các ghi nhận “chưa có bằng chứng v2”/“chưa có code/test v2” ở hàng 2 và 2′ là trạng thái lịch sử trước B1.
+
+Định tuyến hiện hành theo người dùng: thực thi dùng Codex `gpt-6.1-sol`, effort theo độ khó; review cuối được phép dùng `gpt-6-astra`, không dùng Luna/model rẻ hơn hoặc giao thêm Claude. Các tên Sonnet trong lịch sử thiết kế bên dưới là định tuyến cũ. Chỉ dẫn người dùng mới nhất bỏ ngưỡng dừng 5%: tiếp tục công việc được giao bất kể tỷ lệ hiển thị, lưu artifact tăng dần. Nếu provider thực sự từ chối thì ghi nguyên nhân và trạng thái chưa kiểm chứng trung thực. **Cập nhật 2026-11-07:** riêng phần đóng gói (closeout), người dùng duyệt worker thực thi là Claude `sonnet` thay cho Codex Sol; review cuối vẫn là `gpt-6-astra`, chưa chạy. Chi tiết receipt: [báo cáo gate v2](../reviews/2026-11-02-v2-automated-gates.md).
 
 ## 0. Mục tiêu
 
@@ -186,7 +188,7 @@ Lý do: ở v1, slot của Server được trả ngay khi socket đóng (`Sessio
 
 ## 2. Tách package và lớp theo vai (đã duyệt)
 
-### 2.1 Hiện trạng
+### 2.1 Hiện trạng baseline trước refactor (lịch sử)
 
 Code hiện chia theo hướng kết nối, nên mỗi lớp session gộp hai nửa:
 - `server/ServerSession.java` (590 dòng) = nửa lắng nghe (reserve, token, ATTACH) + nửa điều khiển (`FrameMonitor`, `publishFrame`, gate/epoch, `offerInput`, `releaseControlInput`, frame observer).
@@ -488,7 +490,9 @@ Nguồn chính thức cho cấu hình: [Maven lifecycle và thứ tự goal](htt
   - máy có nhiều adapter mạng;
   - jar v1 kết nối vào v2.
 
-## 4. Ghi chú cho Phần 3 (chưa trình bày)
+## 4. Ghi chú UI trước B1 (thiết kế Phần 3–4 đã duyệt)
+
+Hợp đồng đã duyệt nằm ở [UI/CLI và H2](2026-11-02-host-viewer-ui-cli-h2-design.md), mục 3–4. Các ghi chú dưới đây là đầu vào lịch sử, không phải bằng chứng lỗi đã sửa.
 
 - `ClientFrame` (sẽ thành cửa sổ nhập mã của Viewer):
   - Lỗi đã biết: `pendingText` (lý do `connect()` không chạy) bị xóa ngay ở snapshot kế tiếp nếu snapshot `IDLE` vẫn còn `message` của phiên trước. Vì vậy người dùng có thể không kịp thấy lỗi nhập liệu (`ClientFrame.java:89-93`).

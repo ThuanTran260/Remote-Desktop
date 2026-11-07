@@ -67,6 +67,8 @@ Host sở hữu SharingBar không nhận focus, mã và nút Dừng. Viewer sở
 - `viewer/`: ViewerSession, kết nối, frame receiver, gate/epoch, control state.
 - `ui/`: Controller/Snapshot, runtime, HostFrame/ViewerFrame, form state và capture trên EDT.
 
+Trạng thái theo SHA và các gate còn thiếu: [báo cáo gate v2 tập trung](docs/superpowers/reviews/2026-11-02-v2-automated-gates.md). Bảng test được giữ trong [test map](docs/superpowers/reviews/2026-11-02-v2-test-map.md). GĐ2 chưa được nghiệm thu đầy đủ.
+
 [Thiết kế Host/Viewer v2](docs/superpowers/specs/2026-11-01-host-viewer-design.md) và [hợp đồng UI/CLI/H2](docs/superpowers/specs/2026-11-02-host-viewer-ui-cli-h2-design.md) là đặc tả hiện hành.
 
 ## Giới hạn và quy ước

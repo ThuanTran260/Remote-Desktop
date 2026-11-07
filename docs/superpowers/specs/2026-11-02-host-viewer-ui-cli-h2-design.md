@@ -2,6 +2,8 @@
 
 Ngày: 2026-11-02. **Trạng thái: Người dùng đã duyệt thiết kế để tiếp tục B1/B2.** Câu trả lời phê duyệt: “Duyệt thiết kế, tiếp tục B1/B2 (Khuyến nghị)”. Builder/re-review vòng 1 và review toàn đợt Codex Astra high đã PASS / APPROVED, cả hai finding cũ ADDRESSED. Cho phép lập plan và thực thi B1/B2; phê duyệt thiết kế không phải bằng chứng code/test v2 hoặc H2 đã chạy.
 
+**Mốc đọc ngày 2026-11-04:** Phần 3–4 và thực thi B1/B2 đã được duyệt; code/refactor đã được nhận theo từng đợt. Trạng thái theo SHA, bằng chứng và các gate còn thiếu nằm ở [báo cáo gate v2 tập trung](../reviews/2026-11-02-v2-automated-gates.md); hướng dẫn chạy hiện hành nằm ở [README](../../../README.md). Không suy từ phê duyệt thiết kế hoặc lịch sử v1 thành nghiệm thu đủ GĐ2.
+
 Nguồn đọc cố định: `369440779658424e631b4d0a965f870dde5ea7b9` (gọi tắt **S**). Mọi `path:line` dưới đây thuộc S, được đọc bằng `git show S:path`, không phải số dòng của working tree có worker khác đang sửa. Tham chiếu tương đối tính từ gốc repository. Đặc tả chính: `docs/superpowers/specs/2026-11-01-host-viewer-design.md` (gọi tắt **HV**). “Phần 3–4” là hai phần UI/CLI và tài liệu/H2 trong bảng trạng thái HV, nay đã duyệt; không thay thế mục `## 3. Kiểm thử chặn lỗi` đã duyệt của HV.
 
 ## 1. Ý định, điều đã chốt và phạm vi đề xuất
@@ -10,7 +12,7 @@ Người dùng đã chốt Host là máy bị điều khiển, lắng nghe và �
 
 Mục tiêu mới là người dùng nhìn tên cửa sổ, help hoặc README đều biết phải chạy trên máy nào; thao tác Hủy/Dừng/Ngắt có nghĩa nhất quán; UI không báo sẵn sàng khi Host còn chạy adapter hoặc nhả input. Phần H2 phải ghi được kết quả thật trên hai máy và tách bằng chứng đó khỏi test giả/headless.
 
-Tên cờ, chính sách bỏ cú pháp cũ, tên lớp UI, cách giữ thông báo lỗi nhập liệu, bố trí cửa sổ và cách phân bố hai lượt H2 bên dưới đều là **đề xuất của người soạn**, chưa phải quyết định người dùng. Không thêm dependency, lớp điều phối tổng quát, seam dự phòng, chức năng ghép lại một kênh, tự reconnect, cấp quyền mới, FRAME_ACK/freshness v3 hay đổi giá trị timeout. Cleanup pending ticker thuộc Task 1 và không được bản nháp này chứng nhận.
+Tên cờ, chính sách bỏ cú pháp cũ, tên lớp UI, cách giữ thông báo lỗi nhập liệu, bố trí cửa sổ và cách phân bố hai lượt H2 bên dưới thuộc thiết kế Phần 3–4 đã được người dùng duyệt; nguồn khảo sát tại S vẫn là lịch sử trước B1. Không thêm dependency, lớp điều phối tổng quát, seam dự phòng, chức năng ghép lại một kênh, tự reconnect, cấp quyền mới, FRAME_ACK/freshness v3 hay đổi giá trị timeout. Cleanup pending ticker thuộc Task 1 và không được bản nháp này chứng nhận.
 
 ## 2. Hiện trạng tại S và các cách ánh xạ
 
@@ -192,13 +194,13 @@ InputExecutor gọi Robot input trên worker riêng; sender gọi Robot capture 
 
 ## 4. Phần 4 — Tài liệu và nghiệm thu H2 đề xuất
 
-### 4.1 Tài liệu cần đồng bộ khi B1/B2 được phép
+### 4.1 Tài liệu cần đồng bộ sau phê duyệt B1/B2
 
 | Tài liệu / artifact | Thay đổi ở B1 | Đồng bộ cơ học ở B2 |
 | --- | --- | --- |
 | `README.md` | Vai Host/Viewer, sơ đồ hai kênh, đưa mã là đồng ý, CLI migration/help, Firewall inbound ở Host, build/run, giới hạn và trạng thái thực tế | Tên package/lớp cuối, liên kết báo cáo theo SHA. Không xóa sự thật “H2 chưa chạy” trước khi có kết quả. |
 | HV và bản tích hợp đề xuất `docs/superpowers/specs/2026-11-02-host-viewer-ui-cli-h2-design.md` | Coordinator cập nhật bảng trạng thái Phần 3–4 bằng quyết định duyệt thật, ghi wire v2 chỉ khi commit B1 có bằng chứng | Ghi B2 và tên lớp cuối; giữ lịch sử và các giới hạn. Không dùng trạng thái lịch sử G0 làm trạng thái hiện tại. |
-| `docs/superpowers/plans/2026-11-01-host-viewer-orchestration-roadmap.md`, `2026-11-02-host-viewer-v2-preparation.md` và báo cáo execution | Gắn các gate đã đạt với SHA, provider thực tế theo receipt; đánh dấu B1/B2 còn chờ khi chưa duyệt | Ghi hoàn tất đúng phạm vi được kiểm; không coi checklist là kết quả test. |
+| `docs/superpowers/plans/2026-11-01-host-viewer-orchestration-roadmap.md`, `2026-11-02-host-viewer-v2-preparation.md` và báo cáo execution | Gắn các gate đã đạt với SHA, provider thực tế theo receipt; ghi thiết kế/thực thi đã được duyệt; kết luận code và gate theo SHA, bằng chứng thực tế | Ghi hoàn tất đúng phạm vi được kiểm; không coi checklist là kết quả test. |
 | `docs/superpowers/specs/2026-10-19-remote-desktop-design.md` | Chỉ rõ các đoạn vai/luồng v1 được HV v2 thay; link quy tắc đang có hiệu lực | Không viết lại lịch sử như thể v1 vốn là Host/Viewer. |
 | `docs/superpowers/plans/2026-10-27-remote-upgrade-plan.md` | Sửa thông tin “chưa có spec”; giữ H2 v2 trước P0, FRAME_ACK/freshness vẫn v3 | Sửa tên lớp khi cần, không triển khai nâng cấp hiệu năng. |
 | `docs/superpowers/reviews/2026-10-20-wave3-4-checkpoint.md` | Thêm hướng dẫn H2 v2 đang có hiệu lực và link, cờ Server/Client cũ chỉ còn là lịch sử | Không tiếp tục chỉ người dùng chạy jar v2 bằng cờ v1. |
@@ -206,11 +208,11 @@ InputExecutor gọi Robot input trên worker riêng; sender gọi Robot capture 
 | `docs/superpowers/reviews/2026-10-20-wave4-acceptance-results.md`, `2026-10-20-wave4-release-jar-results.md` | Tạo phần/lượt v2 riêng cho dài hạn, jar/help, exit, shutdown và thiếu bằng chứng | Không kế thừa PASS từ jar hay SHA cũ. |
 | Test map `docs/superpowers/reviews/<ngày>-v2-test-map.md`, report coverage/500 race/PIT | Trace từng test cũ sang kỳ vọng v2; lưu artifact theo SHA được chạy | Tên đích đúng HV 2.2/3.7, class gate không mất tên; final-SHA evidence do coordinator sở hữu. |
 
-Không sửa những tài liệu trên ở Task 2. Coordinator tích hợp sau builder review, giải quyết finding material rồi trình người dùng lựa chọn; chưa bắt đầu viết plan B1.
+Không sửa những tài liệu trên ở Task 2. Phần 3–4 và thực thi B1/B2 đã được người dùng duyệt ngày 2026-11-02; coordinator tích hợp theo SHA/gate thực tế sau xử lý finding material. Task 4 chuẩn bị tài liệu không phải phê duyệt hoặc hoàn tất G1/GĐ2; trạng thái tập trung ở báo cáo gate v2 được liên kết đầu tài liệu. Giữ nguyên provenance và kết quả các đợt trước.
 
 ### 4.2 Lệnh và trình tự chạy H2 v2 dự kiến
 
-**Các lệnh dưới đây dành cho bản v2 tương lai sau duyệt và B1/B2, chưa chạy trong task này.** Chỉ một người sở hữu build/target; không build đồng thời worker khác. Trên máy build Windows ở root repo:
+**Các lệnh dưới đây thuộc quy trình H2 v2 đã duyệt; việc duyệt và code B1/B2 không chứng minh chúng đã được chạy.** Chỉ một người sở hữu build/target; không build đồng thời worker khác. Trên máy build Windows ở root repo:
 
 ```powershell
 git rev-parse HEAD

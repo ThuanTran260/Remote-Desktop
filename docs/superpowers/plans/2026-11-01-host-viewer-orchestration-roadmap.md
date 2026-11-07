@@ -131,7 +131,7 @@ Executable đã resolve cho phiên khảo sát: `C:/Users/Admin/AppData/Local/Pr
 - [ ] Trình bày/chốt Phần 3 UI/CLI và Phần 4 tài liệu/H2, rồi viết plan riêng B1/B2. Effort đề xuất theo provider hiện hành: B1 Codex xhigh + reviewer xhigh; B2 Codex high + reviewer medium. Giai đoạn này chưa bắt đầu.
 - [ ] Sau B2 mới chạy PIT trên SHA code/test cuối và 500 vòng race; H2 chạy trên hai máy theo spec. Xử lý finding trước merge. Không lấy kết quả A0 hoặc A1–B0 thay bằng chứng cho v2.
 
-## Tình trạng hiện tại
+## Tình trạng tại bàn giao A1–B0 (lịch sử)
 
 **G0, C0 và A1–B0 đã hoàn tất**, mỗi task có review và verify. SHA code cuối `84a4682a93fae5f41320e549e252bfd3a872d57e`: coordinator `clean verify` đạt **910 test, 0 failures/errors/skipped**, cả năm gate ≥0.80; ba ca latch B0 đều đạt 20 lượt. Review toàn đợt **PASS / APPROVED**, không có finding trong phạm vi thực thi. [Báo cáo nghiệm thu, ngoại lệ và bằng chứng](../reports/2026-11-01-host-viewer-a1-b0-execution.md); [review cuối](../reviews/2026-11-02-host-viewer-a1-b0-final-review.md).
 
@@ -140,3 +140,7 @@ Executable đã resolve cho phiên khảo sát: `C:/Users/Admin/AppData/Local/Pr
 Cleanup B0 chứng minh session registrations về 0 trong fixture tắt pending ticker, đồng thời kiểm thread và port. Core mặc định có giới hạn bộ đếm pending registration tồn tại từ baseline: `Ticker.close` dừng executor nhưng không xóa tickables. Review cuối xếp đây là Minor kế thừa, không chặn checkpoint hiện tại; follow-up riêng là điều kiện trước chứng nhận merge v2. Không diễn giải test này thành đã chứng minh bộ đếm core mặc định về 0.
 
 Các mục "Bằng chứng baseline đã kiểm" và "Review Focus và kết luận tại 30d1604" là **bằng chứng lịch sử** tại `30d1604`, không thay thế nghiệm thu SHA cuối. Checkbox cũ là checklist thiết kế; trạng thái thực thi có thẩm quyền nằm trong báo cáo nghiệm thu và ledger của Run `run_c4af214b4a8d`.
+
+**Cập nhật sau bàn giao:** pending ticker mặc định đã được xử lý trong `e58afc77a41870d110cfb456a536f6253644cd94`, với 912 test coordinator và giới hạn trong [báo cáo chuẩn bị](../reports/2026-11-02-host-viewer-v2-preparation.md). Phần 3–4 và thực thi B1/B2 đã được duyệt; các checkbox chờ phê duyệt/xử lý ticker ở checkpoint trên là lịch sử. Không kế thừa PASS C0–B0 cho v2.
+
+**Mốc đọc ngày 2026-11-04:** Phần 3–4 và thực thi B1/B2 đã được duyệt; code/refactor đã được nhận theo từng đợt. Trạng thái theo SHA, bằng chứng và các gate còn thiếu nằm ở [báo cáo gate v2 tập trung](../reviews/2026-11-02-v2-automated-gates.md); hướng dẫn chạy hiện hành nằm ở [README](../../../README.md). Không suy từ phê duyệt thiết kế hoặc lịch sử v1 thành nghiệm thu đủ GĐ2.

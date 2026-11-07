@@ -1,3 +1,5 @@
+> **Đã được thay thế (ghi chú ngày 2026-11-08).** Tài liệu này là checkpoint quota lịch sử của đợt B1 dở dang; các câu "B1 chưa hoàn tất, chưa commit" bên dưới chỉ đúng tại thời điểm đó. B1 và B2 sau đó đã được commit và nhận (xem bảng commit trong [báo cáo gate v2](../reviews/2026-11-02-v2-automated-gates.md), SHA hiện hành `8f1f70171d0157b7d27e6c267f9c671b9a5fb598`) và [báo cáo closeout](../reports/2026-11-08-host-viewer-closeout.md). Việc này không có nghĩa GĐ2 đã được nghiệm thu: desktop gate, H1/H2 và final Astra review CHƯA CHẠY. Nội dung gốc giữ nguyên bên dưới.
+
 # Checkpoint quota — Host/Viewer B1–B2
 
 Ngày 2026-11-02. Người dùng yêu cầu dừng ở khoảng 5% quota, lưu công việc rồi chỉ tiếp tục khi có lệnh bắt đầu/continue sau reset. Coordinator quan sát CLI chạm **5% quota 5 giờ** lúc khoảng 13:35 +07; đã dừng công việc mới. CLI hiển thị reset lúc 17:29; mốc reset không phải lệnh tự tiếp tục.
