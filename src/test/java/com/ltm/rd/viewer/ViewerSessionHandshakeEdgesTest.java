@@ -438,6 +438,9 @@ class ViewerSessionHandshakeEdgesTest {
         RawPeer pendingCmd = attaching(pendingServer);
         assertEquals(ViewerPhase.ATTACHING, pending.phase());
 
+        // PONG proves writer progress before the final wire assertion.
+        pendingCmd.send(Packet.ping(101));
+        assertEquals(101, pendingCmd.readUntil(PacketType.PONG).seq());
         pendingCmd.send(Packet.keyPress(65));
 
         awaitTerminated(pending);
@@ -457,6 +460,8 @@ class ViewerSessionHandshakeEdgesTest {
         active.activated().get(WAIT_S, TimeUnit.SECONDS);
         assertEquals(ViewerPhase.ACTIVE, active.phase());
 
+        activeCmd.send(Packet.ping(102));
+        assertEquals(102, activeCmd.readUntil(PacketType.PONG).seq());
         activeCmd.send(Packet.sessionActive());
 
         awaitTerminated(active);
