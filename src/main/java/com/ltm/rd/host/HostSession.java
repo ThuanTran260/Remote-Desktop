@@ -286,7 +286,6 @@ public final class HostSession implements Tickable {
             if (imageChannel != null) return AttachResult.REJECTED;
             if (!pc.handOver(now, env.timeouts().handshake(), tx)) return AttachResult.REJECTED;
             imageChannel = ch;
-            tx.after(() -> setReadTimeout(ch, env.timeouts().imgSoTimeout()));
             lifecycle.addStopHook(ch::closeWrappersQuietly);
             maybeActivate(tx);
             return AttachResult.ATTACHED;

@@ -287,6 +287,8 @@ public final class ViewerSession implements Tickable {
         img.setTcpNoDelay(true);
         if (!connect(img, cfg.imgPort())) return;
         Channel imgChannel = Channel.wrap(img, new TrafficCounter());
+        // The Viewer reads the frames: arm the image read timeout before the channel is published or read
+        img.setSoTimeout((int) timeouts.imgSoTimeout().toMillis());
         lifecycle.addStopHook(imgChannel::closeWrappersQuietly);
         PacketIO.write(imgChannel.out(), Packet.attach(result.token()));
         imgChannel.out().flush();

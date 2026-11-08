@@ -46,6 +46,12 @@ class ViewerSessionHandshakeEdgesTest {
             Duration.ofSeconds(10), Duration.ofSeconds(3), Duration.ofSeconds(15), Duration.ofSeconds(20),
             Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofMillis(300), Duration.ofSeconds(3),
             Duration.ZERO, Duration.ofSeconds(30), Duration.ofMillis(100));
+    /** {@link #TIMEOUTS} with only the image read timeout shortened, so a silent image channel ends quickly. */
+    private static final Timeouts SHORT_IMAGE_READ = new Timeouts(TIMEOUTS.handshake(), TIMEOUTS.reserve(),
+            TIMEOUTS.clientAuth(), TIMEOUTS.clientActivation(), TIMEOUTS.pingInterval(), TIMEOUTS.liveness(),
+            TIMEOUTS.cmdSoTimeout(), TIMEOUTS.frameStall(), TIMEOUTS.frameTimeout(), Duration.ofMillis(500),
+            TIMEOUTS.cmdWriteLimit(), TIMEOUTS.imgWriteLimit(), TIMEOUTS.closeGrace(), TIMEOUTS.connect(),
+            TIMEOUTS.wrongCodeDelay(), TIMEOUTS.ipLock(), TIMEOUTS.tick());
 
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "test-sched");
@@ -425,6 +431,47 @@ class ViewerSessionHandshakeEdgesTest {
         assertEquals("connect failed", info.message());
         assertFalse(info.sendDisconnect());
         assertTrue(c.activated().isCompletedExceptionally());
+        assertEquals(0, c.framesReceived());
+    }
+
+    /**
+     * The Viewer reads the image channel, so the image read timeout (spec: setSoTimeout(20000), shortened here)
+     * must be armed on the Viewer's socket. The ticker is idle, so the frame timeout cannot mask a missing
+     * SO_TIMEOUT, and command PINGs keep arriving, so the command reader keeps the session alive meanwhile.
+     */
+    @Test
+    void silentImageChannelTimesOutOnTheViewerWhileCommandTrafficContinues() throws Exception {
+        RawPeer.Server rs = rawServer();
+        ViewerSession c = new ViewerSession(new ViewerConfig("127.0.0.1", rs.cmdPort(), rs.imgPort(), "123456",
+                SHORT_IMAGE_READ, clock), generations.incrementAndGet(), SocketConnector.DEFAULT, ViewerHooks.none(),
+                idleTicker, scheduler, cleanup);
+        clients.add(c);
+        c.start();
+        RawPeer cmd = attaching(rs);
+        cmd.send(Packet.ping(201)); // the command channel works before the image reader exists
+        assertEquals(201, cmd.readUntil(PacketType.PONG).seq());
+        cmd.send(Packet.sessionActive());
+        c.activated().get(WAIT_S, TimeUnit.SECONDS);
+        assertEquals(ViewerPhase.ACTIVE, c.phase());
+
+        // The server sends no image bytes and keeps the image socket open; only command PINGs flow.
+        int seq = 300;
+        long bound = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!c.lifecycle().isClosed() && System.nanoTime() < bound) {
+            cmd.send(Packet.ping(seq++));
+            try {
+                c.terminated().get(50, TimeUnit.MILLISECONDS); // bounded pause between PINGs, ends at once on close
+            } catch (java.util.concurrent.TimeoutException stillRunning) {
+                // not terminated yet: send the next PING
+            }
+        }
+
+        assertTrue(c.lifecycle().isClosed(), "a silent image channel must time out although command traffic continues");
+        awaitTerminated(c);
+        CloseInfo info = closeInfo(c);
+        assertEquals(Packet.DisconnectReason.TIMEOUT, info.reason());
+        assertEquals("image read timeout", info.message());
+        assertTrue(info.sendDisconnect());
         assertEquals(0, c.framesReceived());
     }
 

@@ -21,7 +21,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -121,29 +121,30 @@ class HostSessionLifecycleContractTest {
         }
     }
 
-    @Test void imageHandoverAppliesTimeoutOutsideLockAndHandlesSetterFailure() throws Exception {
+    /**
+     * After ATTACH the Host only writes frames on the image channel and never reads it, so it arms no read
+     * timeout there: the Viewer owns the image read timeout. A socket whose setter would fail (or that records
+     * any setter call) therefore does not affect the hand-over.
+     */
+    @Test void imageHandoverArmsNoReadTimeoutOnTheSendOnlyHostSocket() throws Exception {
         for (boolean fail : new boolean[] {false, true}) {
             try (Fixture f = new Fixture()) {
                 Wire image = f.wire("image");
                 image.socket.failTimeout = fail;
-                AtomicBoolean underLock = new AtomicBoolean();
-                image.socket.onTimeout = () -> underLock.set(lockHeld(f.lifecycle));
+                AtomicInteger setterCalls = new AtomicInteger();
+                image.socket.onTimeout = setterCalls::incrementAndGet;
                 assertEquals(HostSession.AttachResult.ATTACHED,
                         f.session.attachImage(Packet.attach(TOKEN).attachPayload(),
                                 new PendingConnection(image.socket, s(1)), image.channel, s(1)));
-                assertFalse(underLock.get());
-                if (fail) {
-                    assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, f.session.closeInfo().orElseThrow().reason());
-                    assertEquals("cannot set read timeout", f.session.closeInfo().orElseThrow().message());
-                    assertTrue(f.session.inputReleased().isDone());
-                } else {
-                    assertEquals(20_000, image.socket.timeout);
-                    Wire rejected = f.wire("duplicate");
-                    assertEquals(HostSession.AttachResult.REJECTED,
-                            f.session.attachImage(Packet.attach(TOKEN).attachPayload(),
-                                    new PendingConnection(rejected.socket, s(1)), rejected.channel, s(1)));
-                    assertEquals(0, rejected.socket.timeout);
-                }
+                assertEquals(0, setterCalls.get(), "the Host never reads the image channel after ATTACH");
+                assertEquals(0, image.socket.timeout);
+                assertTrue(f.session.closeInfo().isEmpty(), "no setter, so no setter failure can close the session");
+                assertEquals(HostPhase.RESERVED, f.session.phase());
+                Wire rejected = f.wire("duplicate");
+                assertEquals(HostSession.AttachResult.REJECTED,
+                        f.session.attachImage(Packet.attach(TOKEN).attachPayload(),
+                                new PendingConnection(rejected.socket, s(1)), rejected.channel, s(1)));
+                assertEquals(0, rejected.socket.timeout);
             }
         }
     }
