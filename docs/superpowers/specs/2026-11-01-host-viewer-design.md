@@ -476,6 +476,8 @@ Nguồn chính thức cho cấu hình: [Maven lifecycle và thứ tự goal](htt
 - Xuất `XML` và `HTML`. Lưu `mutations.xml` vào `docs/superpowers/reviews/<ngày>-pit-mutations.xml`.
 - Review từng `SURVIVED` và `NO_COVERAGE`: thêm test, hoặc chứng minh mutation tương đương code gốc; không coi thiếu coverage là tương đương. `TIMED_OUT`/`RUN_ERROR` phải được điều tra, không tự tính là test đã kiểm đúng hành vi. Không chỉ ghi điểm tổng; code/test liên quan thay đổi sau lượt đo thì chạy lại phạm vi bị ảnh hưởng và ghi SHA mới. Cấu hình theo [PIT Maven](https://pitest.org/quickstart/maven/).
 
+> **Ghi chú thực hiện (2026-11-08).** XML của lượt PIT thực tế được lưu tại [2026-11-08-pit-mutations.xml](../reviews/2026-11-08-pit-mutations.xml) (SHA-256 `34aaf16cdfaa5ca0f102be843e9f7032f46b5220ef557fef7e3ba9ce5ea181bd`), chạy ở `bd7c5b6`, **không** ở SHA code cuối `e49c907`. Đây là độ lệch khỏi quy tắc "chạy trên SHA cuối" ở trên, do người dùng duyệt ngày 2026-11-08: `e49c907` chỉ thêm một test, `git diff bd7c5b6 e49c907 -- src/main pom.xml` rỗng và các dòng `catch` được phủ không có mutant. Chi tiết và kết quả: [báo cáo gate v2](../reviews/2026-11-02-v2-automated-gates.md).
+
 ### 3.8 Review và nghiệm thu tay
 
 - Mỗi task có review độc lập theo effort đã duyệt (C0/A1/A2/B0/B1 xhigh; A3 high; A4 và B2 medium) theo checklist: state machine, CAS ownership, close idempotent, deadline, thứ tự lock, quy tắc stream ở 1.3, hợp đồng hook ở 2.3, điều kiện trả slot ở 1.8. Finding Critical/High phải đóng trước task sau.
