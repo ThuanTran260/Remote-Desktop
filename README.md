@@ -2,86 +2,77 @@
 
 [![CI](https://github.com/ThuanTran260/Remote-Desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/ThuanTran260/Remote-Desktop/actions/workflows/ci.yml)
 
-Phần mềm điều khiển máy tính từ xa trong mạng LAN, viết bằng **Java thuần**: Socket TCP, `java.awt.Robot` và Swing, không dùng thư viện runtime bên ngoài. Đồ án môn Lập trình mạng.
+Ứng dụng điều khiển máy tính trong LAN bằng Java, Socket TCP, Swing và `java.awt.Robot`, không có thư viện runtime bên ngoài. Đồ án môn Lập trình mạng.
 
-> **Trạng thái:** đang phát triển. Đã xong các module nền (codec giao thức, hàng đợi ghi lệnh, bộ thực thi thao tác, mã hóa/giải mã JPEG) và lõi mạng: bắt tay hai kênh có xác thực mã, phiên làm việc, luồng ảnh và thao tác chuột/phím chạy end-to-end giữa hai đầu socket (Server và Client) bằng adapter giả trên `127.0.0.1`, kèm timeout, cổng điều khiển khi ảnh bị đứng và đóng phiên có kiểm soát. **Chưa có** giao diện Swing, `Robot` thật (chụp màn hình, giả lập chuột/phím), launcher chạy thật và thử trên hai máy; chưa kết luận về Windows thật, DPI, key repeat hay mạng LAN. Tiến độ chi tiết xem [kế hoạch triển khai](docs/superpowers/plans/2026-10-19-remote-desktop-implementation.md).
+## Vai trò protocol v2
 
-## Vai trò
+| Vai trò | Chạy trên máy | Công việc |
+| --- | --- | --- |
+| Host (`--role host`) | Máy bị điều khiển | Lắng nghe, hiện IP/mã 6 số, gửi ảnh và thực thi input |
+| Viewer (`--role viewer`) | Máy điều khiển | Chủ động nối, nhập IP/mã của Host, nhận ảnh và gửi input |
 
-| Vai trò | Máy | Việc làm |
-|---|---|---|
-| **Server** (`--server`) | Máy **điều khiển** | Mở cổng lắng nghe, hiện mã 6 số, nhận ảnh màn hình, gửi thao tác chuột/phím |
-| **Client** (`--client`) | Máy **bị điều khiển** | Nhập IP + mã của Server; bấm *Kết nối* là đồng ý chia sẻ. Gửi ảnh màn hình, thực thi thao tác nhận được |
+Người ngồi ở Host đưa mã là đồng ý chia sẻ, không có hộp thoại xác nhận thứ hai. Nhập mã trong cửa sổ Viewer, không đưa mã vào argv, biến môi trường hoặc nhật ký.
 
-Vai trò TCP được xác định theo bên nào mở cổng lắng nghe, nên máy điều khiển là Server.
-
-## Kiến trúc tóm tắt
-
-```
- Client (bị điều khiển)                         Server (điều khiển)
- ┌──────────────────────┐   cổng 5001: lệnh    ┌──────────────────────┐
- │ InputExecutor ◀──────┼──────────────────────┼─ InputCapture        │
- │ (Robot)              │   AUTH, PING/PONG... │  (chuột/phím Swing)   │
- │                      │                      │                      │
- │ ScreenSender ────────┼──────────────────────┼▶ FrameReceiver       │
- │ (chụp + JPEG)        │   cổng 5000: ảnh     │  → RemotePanel       │
- └──────────────────────┘                      └──────────────────────┘
+```text
+Host (lắng nghe)                         Viewer (chủ động nối)
+InputExecutor / Robot  <--- input ------- InputCapture
+ScreenSender / Robot   --- ảnh/JPEG ----> FrameReceiver / RemotePanel
 ```
 
-- Hai kênh TCP tách riêng, để ảnh dung lượng lớn không làm chậm lệnh chuột.
-- Giao thức nhị phân tự định nghĩa: `[type: 1 byte][length: int32][payload]`, big-endian.
-- Đặc tả đầy đủ: [docs/superpowers/specs/2026-10-19-remote-desktop-design.md](docs/superpowers/specs/2026-10-19-remote-desktop-design.md).
+Host lắng nghe TCP 5001 cho lệnh và 5000 cho ảnh. Token 16 byte ghép kênh ảnh vào phiên đã xác thực. Gate chỉ mở sau khi frame đúng generation/epoch đã được vẽ. Stall khóa input và nhả held state; mất một kênh kết thúc cả phiên, không reconnect riêng kênh ảnh.
 
-## Yêu cầu
-
-- JDK 21 trở lên
-- Không cần cài Maven: dự án có kèm Maven Wrapper (`mvnw`)
+Host dùng một input executor suốt đời runtime, source/geometry mới theo từng phiên. Mã mới chỉ hiện sau khi socket, worker và input release đều hoàn tất bình thường. Host giữ BUSY khi prepare hoặc release chưa dừng; lỗi nhả input yêu cầu khởi động lại ứng dụng.
 
 ## Build và test
 
+Cần JDK 21 trở lên; Maven Wrapper có sẵn, CI dùng JDK 21.
+
 ```bash
 # Linux / macOS / Git Bash
-./mvnw verify
+./mvnw -B -ntp verify
 
-# Windows (cmd / PowerShell)
-mvnw.cmd verify
+# Windows PowerShell / cmd
+.\mvnw.cmd -B -ntp verify
 ```
 
-Lệnh trên chạy toàn bộ test (headless, không cần màn hình) và tạo file `target/remote-desktop.jar`.
+Build tạo `target/remote-desktop.jar`. Test tự động chạy headless bằng adapter giả và socket loopback. Chúng không chứng nhận Robot, focus, DPI hay mạng thật trên hai Windows desktop. H1/H2 v2, gồm 30 phút và 50 vòng kết nối mỗi hướng, vẫn cần bằng chứng nghiệm thu riêng.
 
 ## Chạy
 
 ```bash
 java -jar target/remote-desktop.jar --help
-java -jar target/remote-desktop.jar --server [--cmd-port 5001] [--img-port 5000]
-java -jar target/remote-desktop.jar --client [--host <IP>]
+java -jar target/remote-desktop.jar
+java -jar target/remote-desktop.jar --role host
+java -jar target/remote-desktop.jar --role viewer --address 192.168.1.20
 ```
 
-Hiện tại `--server` và `--client` chỉ in `not implemented yet`.
+Không tham số mở chooser. Host tự start listener; Viewer chỉ được điền sẵn địa chỉ, phải bấm Kết nối. `--address` chỉ hợp lệ với `--role viewer` tường minh. Có thể thêm cùng `--cmd-port 6001 --img-port 6000` ở cả hai máy; port phải khác nhau và trong 1..65535. Mỗi cờ chỉ dùng một lần, role phân biệt hoa/thường, không nhận `--role=host`, positional argument hoặc cờ mã. Help vẫn validate toàn bộ đối số.
 
-## Cấu trúc mã nguồn
+Windows Firewall cần cho phép inbound hai cổng tại Host; Viewer không mở listener. Chọn IPv4 LAN phù hợp của Host từ form; địa chỉ ví dụ chưa phải địa chỉ đã đo.
 
-```
-src/main/java/com/ltm/rd/
-├── Launcher.java, LaunchOptions.java   # điểm khởi động, đọc tham số
-├── common/    # giao thức: Packet, PacketIO, CommandWriter, Channel, ...
-├── client/    # máy bị điều khiển: InputExecutor, InputDevice, ...
-└── server/    # máy điều khiển (chưa có)
-docs/superpowers/
-├── specs/     # đặc tả thiết kế
-├── plans/     # kế hoạch triển khai theo task
-└── reviews/   # báo cáo review thiết kế
-```
+| Cú pháp v1 theo máy cũ | Cú pháp v2 |
+| --- | --- |
+| `--server` trên máy điều khiển | `--role viewer`, nhập IP máy bị điều khiển |
+| `--client --host IP_SERVER_V1` trên máy bị điều khiển | `--role host`, bỏ IP máy điều khiển cũ |
+| `--host IP` không role | Chọn role tường minh; không rewrite tự động |
 
-## Giới hạn
+`--server`, `--client`, `--host` bị từ chối ở mọi vị trí, không alias. Không đổi máy móc IP Server v1 thành `--address`, vì hướng kết nối đã đảo. VERSION 2 từ chối peer v1 bằng BAD_VERSION; dùng cùng một bản jar trên hai máy.
 
-- Chỉ dùng trong **LAN tin cậy**: ảnh, lệnh và mã xác thực truyền **không mã hóa**.
-- Phiên bản 1 chỉ hỗ trợ một phiên, màn hình chính, Windows.
-- Không điều khiển được cửa sổ chạy quyền admin, UAC hoặc màn hình khóa.
-- Windows Firewall phải cho phép hai cổng lắng nghe của Server (mặc định 5000 và 5001).
+## Giao diện và ownership
 
-## Quy ước phát triển
+Host sở hữu SharingBar không nhận focus, mã và nút Dừng. Viewer sở hữu ControlFrame, Hủy trước ACTIVE và Ngắt khi ACTIVE. Đóng cửa sổ điều khiển chỉ ngắt phiên; đóng form chính shutdown runtime. Cleanup chạy nền; kết quả socket/worker/input chưa sạch được cảnh báo trên EDT trước khi thoát.
 
-- Commit theo [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `build:`, `docs:`, `chore:`).
-- Mỗi thay đổi làm trên một branch riêng rồi mở PR vào `main`; CI phải xanh trước khi merge.
-- Code, comment và commit message viết bằng tiếng Anh; tài liệu viết bằng tiếng Việt.
+- `common/`: giao thức, lifecycle, writer, ticker, timeout.
+- `host/`: HostCore/HostSession, handshake, input, screen sender, Robot adapter.
+- `viewer/`: ViewerSession, kết nối, frame receiver, gate/epoch, control state.
+- `ui/`: Controller/Snapshot, runtime, HostFrame/ViewerFrame, form state và capture trên EDT.
+
+Trạng thái theo SHA và các gate còn thiếu: [báo cáo gate v2 tập trung](docs/superpowers/reviews/2026-11-02-v2-automated-gates.md). Bảng test được giữ trong [test map](docs/superpowers/reviews/2026-11-02-v2-test-map.md). GĐ2 chưa được nghiệm thu đầy đủ.
+
+[Thiết kế Host/Viewer v2](docs/superpowers/specs/2026-11-01-host-viewer-design.md) và [hợp đồng UI/CLI/H2](docs/superpowers/specs/2026-11-02-host-viewer-ui-cli-h2-design.md) là đặc tả hiện hành.
+
+## Giới hạn và quy ước
+
+Chỉ dùng LAN tin cậy: ảnh, lệnh và mã truyền không mã hóa. Phạm vi là một phiên, màn hình chính, Windows; không điều khiển UAC, màn hình khóa hoặc cửa sổ quyền admin cao hơn. Chưa có FRAME_ACK/freshness v3, relay sản phẩm hay tự reconnect.
+
+Code/comment/commit tiếng Anh, tài liệu tiếng Việt. UTF-8 không BOM, LF; Java indent 4, XML/YAML/JSON indent 2 theo `.editorconfig`. Commit theo Conventional Commits; CI phải xanh trước merge. Không hạ coverage gate, timeout/repetition hoặc disable test để lấy xanh.

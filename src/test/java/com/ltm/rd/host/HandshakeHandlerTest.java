@@ -1,0 +1,311 @@
+package com.ltm.rd.host;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import com.ltm.rd.common.CloseInfo;
+import com.ltm.rd.common.FakeClock;
+import com.ltm.rd.common.Packet;
+import com.ltm.rd.common.PacketIO;
+import com.ltm.rd.common.PacketType;
+import com.ltm.rd.common.Protocol;
+import com.ltm.rd.common.SessionLifecycle;
+import com.ltm.rd.common.Timeouts;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.security.SecureRandom;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+/**
+ * {@link HandshakeHandler} driven directly on the test thread over real loopback sockets. Whatever
+ * the peer wrote is already in the socket buffer when {@code handle} runs, so no case waits on a
+ * timer; the outcome is read from the session manager, the session's close info and what the peer
+ * receives. Failures after the reservation are forced through the {@code onReserved} callback and
+ * the clock the handler reads, which are its only collaborators that run mid-handshake.
+ */
+@Timeout(60)
+class HandshakeHandlerTest {
+    private static final int WAIT_MS = 10_000;
+    private static final Timeouts TIMEOUTS = new Timeouts(Duration.ofSeconds(3), Duration.ofSeconds(5),
+            Duration.ofSeconds(5), Duration.ofSeconds(7), Duration.ofSeconds(2), Duration.ofSeconds(8),
+            Duration.ofSeconds(10), Duration.ofSeconds(3), Duration.ofSeconds(15), Duration.ofSeconds(20),
+            Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofMillis(50), Duration.ofSeconds(3),
+            Duration.ZERO, Duration.ofSeconds(30), Duration.ofMillis(100));
+
+    private final FakeClock clock = new FakeClock();
+    private final List<Socket> sockets = new ArrayList<>();
+    private ScheduledExecutorService scheduler;
+    private ExecutorService cleanup;
+    private ServerSocket listener;
+    private SessionManager sessions;
+    private PendingConnections pending;
+
+    @BeforeEach
+    void setUp() throws IOException {
+        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "test-sched");
+            t.setDaemon(true);
+            return t;
+        });
+        cleanup = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "test-cleanup");
+            t.setDaemon(true);
+            return t;
+        });
+        listener = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
+        listener.setSoTimeout(WAIT_MS);
+        sessions = new SessionManager(new SecureRandom(), new AuthGuard(16, 3, Duration.ofSeconds(30)), TIMEOUTS,
+                clock, this::newSession);
+        pending = new PendingConnections(TIMEOUTS.handshake());
+    }
+
+
+    private final com.ltm.rd.host.HostTestAccess.HostResources hostResources = new com.ltm.rd.host.HostTestAccess.HostResources();
+
+    @AfterEach
+    void tearDown() throws IOException {
+        for (Socket s : sockets) s.close();
+        listener.close();
+        scheduler.shutdownNow();
+        cleanup.shutdownNow();
+        hostResources.close();
+    }
+
+    private HostSession newSession(long generation, byte[] token, InetAddress peer, long reservedAt) {
+        SessionLifecycle<HostPhase> lifecycle = new SessionLifecycle<>(HostPhase.RESERVED, HostPhase.CLOSING,
+                System::nanoTime, Duration.ofMillis(50), scheduler, cleanup);
+        HostSession.Env env = hostResources.env(TIMEOUTS, clock, null, () -> false, null, null);
+        return new HostSession(generation, token, peer, reservedAt, lifecycle, env);
+    }
+
+    private HandshakeHandler handler(LongSupplier handlerClock, Consumer<HostSession> onReserved) {
+        return new HandshakeHandler(sessions, pending, TIMEOUTS, handlerClock, onReserved, null, java.util.function.UnaryOperator.identity());
+    }
+
+    /** One accepted connection: {@code client} is the peer's end, {@code pc} the server's. */
+    private record Link(Socket client, PendingConnection pc) {
+        void send(Packet p) throws IOException {
+            DataOutputStream out = new DataOutputStream(client.getOutputStream());
+            PacketIO.write(out, p);
+            out.flush();
+        }
+
+        /** The next packet the server sent, or empty when it closed the connection. */
+        Optional<Packet> receive() throws IOException {
+            return PacketIO.read(new DataInputStream(client.getInputStream()), Protocol.CMD_MAX_LEN,
+                    EnumSet.allOf(PacketType.class));
+        }
+    }
+
+    private Link link() throws IOException {
+        Socket client = new Socket(InetAddress.getLoopbackAddress(), listener.getLocalPort());
+        client.setSoTimeout(WAIT_MS);
+        sockets.add(client);
+        Socket accepted = listener.accept();
+        sockets.add(accepted);
+        return new Link(client, new PendingConnection(accepted, clock.getAsLong()));
+    }
+
+    private static void closeQuietly(Socket s) {
+        try {
+            s.close();
+        } catch (IOException ignored) {
+            // the test only wants the socket gone
+        }
+    }
+
+    @Test
+    void interruptedWrongCodeDelayRestoresFlagAndCleansConnection() throws Exception {
+        Link link = link();
+        pending.add(link.pc());
+        String code = sessions.currentCode();
+        link.send(Packet.auth(code.equals("000000") ? "000001" : "000000"));
+        AtomicBoolean interrupted = new AtomicBoolean();
+        CompletableFuture<Void> returned = new CompletableFuture<>();
+        Thread worker = new Thread(() -> {
+            Thread.currentThread().interrupt();
+            try {
+                new HandshakeHandler(sessions, pending, Timeouts.DEFAULTS, clock,
+                        s -> fail("wrong code cannot reserve"), null, java.util.function.UnaryOperator.identity())
+                        .handle(HandshakeHandler.Kind.COMMAND, link.pc());
+                interrupted.set(Thread.currentThread().isInterrupted());
+                returned.complete(null);
+            } catch (Throwable failure) {
+                returned.completeExceptionally(failure);
+            } finally {
+                Thread.interrupted();
+            }
+        }, "test-interrupted-handshake");
+        worker.start();
+        worker.join(WAIT_MS);
+        assertFalse(worker.isAlive());
+        returned.get(5, TimeUnit.SECONDS);
+        assertTrue(interrupted.get(), "positive wrong-code delay must restore cancellation status");
+        Packet reply = link.receive().orElseThrow();
+        assertEquals(Packet.AuthStatus.WRONG_CODE, reply.authResultPayload().status());
+        assertArrayEquals(new byte[Protocol.TOKEN_LEN], reply.authResultPayload().token());
+        assertTrue(sessions.current().isEmpty());
+        assertTrue(link.pc().socket().isClosed());
+        assertTrue(link.receive().isEmpty());
+    }
+
+    @Test
+    void completedHandshakesAreRemovedFromPendingImmediately() throws Exception {
+        var field = PendingConnections.class.getDeclaredField("connections");
+        field.setAccessible(true);
+        Set<?> entries = (Set<?>) field.get(pending);
+        Link accepted = link();
+        pending.add(accepted.pc());
+        accepted.send(Packet.auth(sessions.currentCode()));
+        handler(clock, s -> { }).handle(HandshakeHandler.Kind.COMMAND, accepted.pc());
+        HostSession owned = sessions.current().orElseThrow();
+        try {
+            assertFalse(entries.contains(accepted.pc()), "successful handover must leave pending immediately");
+            pending.closeAll();
+            assertFalse(accepted.pc().socket().isClosed(), "the session owns the handed-over socket");
+            assertEquals(Packet.AuthStatus.OK, accepted.receive().orElseThrow().authResultPayload().status());
+        } finally {
+            owned.close(new CloseInfo(Packet.DisconnectReason.USER, "fixture release", false));
+            owned.socketsClosed().get(5, TimeUnit.SECONDS);
+            owned.terminated().get(5, TimeUnit.SECONDS);
+            owned.inputReleased().get(5, TimeUnit.SECONDS);
+            sessions.onSessionReleased(owned);
+        }
+        Link eof = link();
+        pending.add(eof.pc());
+        eof.client().shutdownOutput();
+        handler(clock, s -> fail("EOF cannot reserve")).handle(HandshakeHandler.Kind.COMMAND, eof.pc());
+        assertFalse(entries.contains(eof.pc()));
+        assertTrue(eof.pc().socket().isClosed());
+        assertTrue(eof.receive().isEmpty());
+        Link failed = link();
+        pending.add(failed.pc());
+        failed.send(Packet.auth(sessions.currentCode()));
+        handler(clock, s -> closeQuietly(failed.pc().socket())).handle(HandshakeHandler.Kind.COMMAND, failed.pc());
+        assertFalse(entries.contains(failed.pc()));
+        assertTrue(failed.pc().socket().isClosed());
+        assertEquals("handshake failed", sessions.current().orElseThrow().closeInfo().orElseThrow().message());
+        assertTrue(failed.receive().isEmpty());
+    }
+
+    // ---- end of stream before the first packet -------------------------------------------------
+
+    @Test
+    void endOfStreamBeforeAuthEndsTheHandshakeWithoutReserving() throws Exception {
+        String codeBefore = sessions.currentCode();
+        Link link = link();
+        link.client().shutdownOutput(); // the peer leaves without sending AUTH
+
+        handler(clock, s -> fail("no session may be reserved")).handle(HandshakeHandler.Kind.COMMAND, link.pc());
+
+        assertTrue(sessions.current().isEmpty());
+        assertEquals(codeBefore, sessions.currentCode());
+        assertTrue(link.receive().isEmpty(), "the server closed the connection without a reply");
+    }
+
+    @Test
+    void endOfStreamBeforeAttachClosesOnlyThatConnection() throws Exception {
+        Link link = link();
+        link.client().shutdownOutput(); // the peer leaves without sending ATTACH
+
+        handler(clock, s -> fail("nothing to reserve on the image port")).handle(HandshakeHandler.Kind.IMAGE,
+                link.pc());
+
+        assertTrue(sessions.current().isEmpty());
+        assertTrue(link.receive().isEmpty(), "the server closed the connection");
+    }
+
+    @Test
+    void attachWithoutASessionClosesTheConnection() throws Exception {
+        String codeBefore = sessions.currentCode();
+        Link link = link();
+        link.send(Packet.attach(new byte[Protocol.TOKEN_LEN])); // no AUTH happened, there is nothing to attach to
+
+        handler(clock, s -> fail("ATTACH never reserves")).handle(HandshakeHandler.Kind.IMAGE, link.pc());
+
+        assertTrue(sessions.current().isEmpty());
+        assertEquals(codeBefore, sessions.currentCode());
+        assertTrue(link.receive().isEmpty(), "no reply: the connection is simply closed");
+    }
+
+    // ---- failures after the reservation --------------------------------------------------------
+
+    @Test
+    void handOverRefusedAfterTheReplyClosesTheReservedSession() throws Exception {
+        Link link = link();
+        link.send(Packet.auth(sessions.currentCode()));
+        // the reply goes out, but by the time the session would take the socket the handshake window is over
+        Consumer<HostSession> pastTheDeadline = s -> clock.advance(TIMEOUTS.handshake());
+
+        handler(clock, pastTheDeadline).handle(HandshakeHandler.Kind.COMMAND, link.pc());
+
+        HostSession session = sessions.current().orElseThrow();
+        CloseInfo info = session.closeInfo().orElseThrow();
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
+        assertEquals("command channel not attached", info.message());
+        assertFalse(info.sendDisconnect());
+        assertEquals(HostPhase.CLOSING, session.phase());
+        Packet reply = link.receive().orElseThrow();
+        assertEquals(PacketType.AUTH_RESULT, reply.type());
+        assertEquals(Packet.AuthStatus.OK, reply.authResultPayload().status());
+        assertTrue(link.receive().isEmpty(), "the unclaimed socket is closed by the handler");
+    }
+
+    @Test
+    void writeFailureAfterTheReservationClosesTheSession() throws Exception {
+        Link link = link();
+        link.send(Packet.auth(sessions.currentCode()));
+        // the socket dies between the reservation and the reply
+        Consumer<HostSession> socketDies = s -> closeQuietly(link.pc().socket());
+
+        handler(clock, socketDies).handle(HandshakeHandler.Kind.COMMAND, link.pc());
+
+        HostSession session = sessions.current().orElseThrow();
+        CloseInfo info = session.closeInfo().orElseThrow();
+        assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
+        assertEquals("handshake failed", info.message());
+        assertFalse(info.sendDisconnect());
+        assertTrue(link.receive().isEmpty(), "AUTH_RESULT never left the server");
+    }
+
+    @Test
+    void writeFailureBeforeAnySessionEndsOnlyThatConnection() throws Exception {
+        String codeBefore = sessions.currentCode();
+        Link link = link();
+        link.send(Packet.auth(codeBefore.equals("000000") ? "000001" : "000000")); // a wrong code: no session
+        AtomicBoolean armed = new AtomicBoolean(true);
+        // the first time the handler reads its clock is while it prepares the WRONG_CODE reply
+        LongSupplier socketDiesOnFirstRead = () -> {
+            if (armed.compareAndSet(true, false)) closeQuietly(link.pc().socket());
+            return clock.getAsLong();
+        };
+
+        handler(socketDiesOnFirstRead, s -> fail("a wrong code never reserves")).handle(HandshakeHandler.Kind.COMMAND,
+                link.pc());
+
+        assertFalse(armed.get(), "the failure was injected");
+        assertTrue(sessions.current().isEmpty(), "there was no session to close");
+        assertEquals(codeBefore, sessions.currentCode());
+        assertTrue(link.receive().isEmpty(), "no reply was written");
+    }
+}

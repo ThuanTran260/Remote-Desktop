@@ -1,11 +1,11 @@
 package com.ltm.rd.common;
 
-/** Wire-protocol constants shared by Server and Client. */
+/** Wire-protocol constants shared by Host and Viewer. */
 public final class Protocol {
     public static final int CMD_PORT = 5001;
     public static final int IMG_PORT = 5000;
     public static final int MAGIC = 0x4C544D52; // "LTMR"
-    public static final int VERSION = 1;
+    public static final int VERSION = 2;
 
     public static final int CMD_MAX_LEN = 1024;
     public static final int IMG_MAX_LEN = 8 * 1024 * 1024;

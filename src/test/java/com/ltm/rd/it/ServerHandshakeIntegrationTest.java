@@ -8,11 +8,11 @@ import com.ltm.rd.common.PacketIO;
 import com.ltm.rd.common.PacketType;
 import com.ltm.rd.common.Protocol;
 import com.ltm.rd.common.Timeouts;
-import com.ltm.rd.server.ServerConfig;
-import com.ltm.rd.server.ServerCore;
-import com.ltm.rd.server.ServerPhase;
-import com.ltm.rd.server.ServerSession;
-import com.ltm.rd.server.ServerTestAccess;
+import com.ltm.rd.host.HostConfig;
+import com.ltm.rd.host.HostCore;
+import com.ltm.rd.host.HostPhase;
+import com.ltm.rd.host.HostSession;
+import com.ltm.rd.host.HostTestAccess;
 import java.io.*;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -46,13 +46,17 @@ class ServerHandshakeIntegrationTest {
     private static final long SLACK_MS = 600;
     private static final Duration GRACE = Duration.ofMillis(300);
 
-    private final List<ServerCore> cores = new ArrayList<>();
+    private final List<HostCore> cores = new ArrayList<>();
     private final List<Raw> raws = new ArrayList<>();
+
+
+    private final com.ltm.rd.host.HostTestAccess.HostResources hostResources = new com.ltm.rd.host.HostTestAccess.HostResources();
 
     @AfterEach
     void cleanup() {
         for (Raw r : raws) r.close();
-        for (ServerCore c : cores) c.close();
+        for (HostCore c : cores) c.close();
+        hostResources.close();
     }
 
     // ---- fixtures --------------------------------------------------------------------------
@@ -78,16 +82,56 @@ class ServerHandshakeIntegrationTest {
         return timeouts(Duration.ofMillis(500));
     }
 
-    private static ServerConfig config(Timeouts t, int cmdPort, int imgPort) {
-        return new ServerConfig(InetAddress.getLoopbackAddress(), cmdPort, imgPort, t, System::nanoTime,
+    private static HostConfig config(Timeouts t, int cmdPort, int imgPort) {
+        return new HostConfig(InetAddress.getLoopbackAddress(), cmdPort, imgPort, t, System::nanoTime,
                 new SecureRandom());
     }
 
-    private ServerCore core(Timeouts t) throws IOException {
-        ServerCore c = new ServerCore(config(t, 0, 0));
+    private HostCore core(Timeouts t) throws IOException {
+        HostCore c = hostResources.core(config(t, 0, 0));
         cores.add(c);
         c.start();
         return c;
+    }
+
+    @Test
+    void acceptedAndConnectedSocketsUseV2Options() throws Exception {
+        var decorated = new java.util.concurrent.atomic.AtomicInteger();
+        Timeouts t = timeouts(Duration.ofSeconds(20));
+        HostCore host = hostResources.core(new HostConfig(InetAddress.getLoopbackAddress(), 0, 0, t,
+                System::nanoTime, new SecureRandom(), out -> { decorated.incrementAndGet(); return out; }));
+        cores.add(host);
+        host.start();
+        var scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        var cleanup = java.util.concurrent.Executors.newCachedThreadPool();
+        var ticker = new com.ltm.rd.common.Ticker(t.tick(), System::nanoTime);
+        var connected = new java.util.concurrent.CopyOnWriteArrayList<Socket>();
+        var viewer = new com.ltm.rd.viewer.ViewerSession(new com.ltm.rd.viewer.ViewerConfig("127.0.0.1",
+                host.cmdPort(), host.imgPort(), host.sessions().currentCode(), t, System::nanoTime), 1,
+                (socket, address, timeout) -> {
+                    assertTrue(socket.getTcpNoDelay(), "connector configures the socket before connecting");
+                    socket.connect(address, timeout);
+                    connected.add(socket);
+                }, com.ltm.rd.viewer.ViewerHooks.none(), ticker, scheduler, cleanup);
+        try {
+            viewer.start();
+            viewer.activated().get(WAIT_S, TimeUnit.SECONDS);
+            HostSession session = host.sessions().current().orElseThrow();
+            assertEquals(2, connected.size());
+            assertEquals(1, decorated.get(), "only the Host image output uses its decorator");
+            for (boolean image : new boolean[] {false, true}) {
+                Socket connector = com.ltm.rd.viewer.ViewerTestAccess.channelSocket(viewer, image);
+                assertSame(connected.get(image ? 1 : 0), connector);
+                assertTrue(connector.getTcpNoDelay());
+                assertTrue(HostTestAccess.channelSocket(session, image).getTcpNoDelay());
+            }
+        } finally {
+            viewer.cancel();
+            viewer.terminated().get(WAIT_S, TimeUnit.SECONDS);
+            ticker.close();
+            scheduler.shutdownNow();
+            cleanup.shutdownNow();
+        }
     }
 
     /** Raw protocol client: speaks PacketIO directly, no session logic. */
@@ -172,7 +216,7 @@ class ServerHandshakeIntegrationTest {
 
     private record Authed(Raw cmd, byte[] token) {}
 
-    private Authed auth(ServerCore c) throws IOException {
+    private Authed auth(HostCore c) throws IOException {
         Raw cmd = raw(c.cmdPort());
         cmd.send(Packet.auth(c.sessions().currentCode()));
         Packet result = cmd.read();
@@ -199,7 +243,7 @@ class ServerHandshakeIntegrationTest {
         }
     }
 
-    private static ServerSession session(ServerCore c) {
+    private static HostSession session(HostCore c) {
         return c.sessions().current().orElseThrow();
     }
 
@@ -209,10 +253,10 @@ class ServerHandshakeIntegrationTest {
         volatile long decidedAtNanos;
         volatile CloseInfo info;
 
-        CloseRecorder(ServerSession s) {
-            ServerTestAccess.lifecycle(s).addCloseHook(() -> {
+        CloseRecorder(HostSession s) {
+            HostTestAccess.lifecycle(s).addCloseHook(() -> {
                 decidedAtNanos = System.nanoTime();
-                info = ServerTestAccess.lifecycle(s).closeInfo().orElse(null);
+                info = HostTestAccess.lifecycle(s).closeInfo().orElse(null);
                 decided.countDown();
             });
         }
@@ -222,8 +266,8 @@ class ServerHandshakeIntegrationTest {
         }
     }
 
-    private void activate(ServerCore c, Authed a) throws IOException {
-        a.cmd().send(Packet.screenInfo(1920, 1080));
+    private void activate(HostCore c, Authed a) throws IOException {
+        assertEquals(Packet.screenInfo(1920, 1080), a.cmd().readUntil(PacketType.SCREEN_INFO));
         raw(c.imgPort()).send(Packet.attach(a.token()));
         a.cmd().readUntil(PacketType.SESSION_ACTIVE);
     }
@@ -232,30 +276,46 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void authOkThenScreenInfoThenAttachActivates() throws Exception {
-        ServerCore c = core(fast());
+        HostCore c = core(fast());
         Authed a = auth(c);
         assertEquals(Protocol.TOKEN_LEN, a.token().length);
-        a.cmd().send(Packet.screenInfo(1920, 1080));
+        assertEquals(Packet.screenInfo(1920, 1080), a.cmd().readUntil(PacketType.SCREEN_INFO));
         raw(c.imgPort()).send(Packet.attach(a.token()));
         a.cmd().readUntil(PacketType.SESSION_ACTIVE);
-        ServerSession s = session(c);
-        assertEquals(ServerPhase.ACTIVE, s.phase());
+        HostSession s = session(c);
+        assertEquals(HostPhase.ACTIVE, s.phase());
         assertEquals(new Packet.SizePayload(1920, 1080), s.screen().orElseThrow());
     }
 
     @Test
     void attachBeforeScreenInfoAlsoActivates() throws Exception {
-        ServerCore c = core(fast());
-        Authed a = auth(c);
-        raw(c.imgPort()).send(Packet.attach(a.token()));
-        a.cmd().send(Packet.screenInfo(1280, 720));
-        a.cmd().readUntil(PacketType.SESSION_ACTIVE);
-        assertEquals(ServerPhase.ACTIVE, session(c).phase());
+        CountDownLatch preparing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        hostResources.factory = new com.ltm.rd.host.AdapterFactory() {
+            @Override public com.ltm.rd.host.InputDevice inputDevice() { throw new AssertionError(); }
+            @Override public void refreshInputDevice() {
+                preparing.countDown();
+                try { release.await(); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
+            }
+            @Override public com.ltm.rd.host.ScreenSource newScreenSource() { return new com.ltm.rd.host.FakeScreenSource(1280, 720); }
+        };
+        try {
+            HostCore c = core(fast());
+            Authed a = auth(c);
+            assertTrue(preparing.await(WAIT_S, TimeUnit.SECONDS));
+            raw(c.imgPort()).send(Packet.attach(a.token()));
+            assertEquals(HostPhase.RESERVED, session(c).phase());
+            release.countDown();
+            assertEquals(Packet.screenInfo(1280, 720), a.cmd().readUntil(PacketType.SCREEN_INFO));
+            a.cmd().readUntil(PacketType.SESSION_ACTIVE);
+            assertEquals(HostPhase.ACTIVE, session(c).phase());
+        } finally { release.countDown(); hostResources.factory = null; }
     }
 
     @Test
     void wrongCodeReturnsWrongCodeAndCloses() throws Exception {
-        ServerCore c = core(fast());
+        HostCore c = core(fast());
         String code = c.sessions().currentCode();
         Raw cmd = raw(c.cmdPort());
         cmd.send(Packet.auth(code.equals("000000") ? "000001" : "000000"));
@@ -269,7 +329,7 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void secondClientGetsBusy() throws Exception {
-        ServerCore c = core(fast());
+        HostCore c = core(fast());
         auth(c);
         Raw second = raw(c.cmdPort());
         second.send(Packet.auth(c.sessions().currentCode()));
@@ -281,7 +341,7 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void silentConnectionClosedAtHandshakeDeadline() throws Exception {
-        ServerCore c = core(deadline(Duration.ofMillis(500)));
+        HostCore c = core(deadline(Duration.ofMillis(500)));
         long start = System.nanoTime();
         Raw silent = raw(c.cmdPort());
         assertWindow(silent.awaitEndMs(start), 300, 300 + SLACK_MS, "silent connection closed");
@@ -289,7 +349,7 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void dripFeedClosedAtHandshakeDeadline() throws Exception {
-        ServerCore c = core(deadline(Duration.ofMillis(500)));
+        HostCore c = core(deadline(Duration.ofMillis(500)));
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         PacketIO.write(new DataOutputStream(bytes), Packet.auth(c.sessions().currentCode()));
         long start = System.nanoTime();
@@ -314,7 +374,7 @@ class ServerHandshakeIntegrationTest {
     @Test
     void poolFullClosesThirteenthImmediately() throws Exception {
         // a long handshake keeps all twelve occupying the pool however slow the setup is
-        ServerCore c = core(timeouts(Duration.ofSeconds(2), Duration.ofMillis(500), Duration.ZERO));
+        HostCore c = core(timeouts(Duration.ofSeconds(2), Duration.ofMillis(500), Duration.ZERO));
         List<Raw> silent = new ArrayList<>();
         for (int i = 0; i < 12; i++) silent.add(raw(c.cmdPort())); // 4 running + 8 queued
         long start = System.nanoTime();
@@ -329,17 +389,17 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void reservedWithoutAttachTimesOutAndCodeChanges() throws Exception {
-        ServerCore c = core(fast());
+        HostCore c = core(fast());
         String oldCode = c.sessions().currentCode();
         Authed a = auth(c);
-        ServerSession s = session(c);
+        HostSession s = session(c);
         CloseRecorder rec = new CloseRecorder(s);
         rec.await();
         assertEquals("attach timeout", rec.info.message());
         assertEquals(Packet.DisconnectReason.TIMEOUT, rec.info.reason());
         assertWindow(ms(rec.decidedAtNanos - s.reservedAtNanos()), 500, 500 + SLACK_MS, "attach timeout decision");
 
-        ServerTestAccess.lifecycle(s).socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
+        HostTestAccess.lifecycle(s).socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
         long socketsMs = ms(System.nanoTime() - rec.decidedAtNanos);
         assertTrue(socketsMs <= GRACE.toMillis() + SLACK_MS, "sockets closed within grace + slack: " + socketsMs);
         List<Packet> tail = a.cmd().drain();
@@ -347,8 +407,8 @@ class ServerHandshakeIntegrationTest {
         assertEquals(PacketType.DISCONNECT, last.type());
         assertEquals(Packet.DisconnectReason.TIMEOUT, last.disconnectPayload().reason());
 
-        ServerTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
-        assertTrue(c.sessions().current().isEmpty());
+        HostTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
+        awaitTrue(() -> c.sessions().current().isEmpty(), "the server slot to be freed");
         assertNotEquals(oldCode, c.sessions().currentCode());
     }
 
@@ -356,20 +416,20 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void attachWithBadVersionDoesNotConsumeToken() throws Exception {
-        ServerCore c = core(timeouts(Duration.ofSeconds(5)));
+        HostCore c = core(timeouts(Duration.ofSeconds(5)));
         Authed a = auth(c);
         Raw bad = raw(c.imgPort());
-        bad.send(Packet.attach(2, a.token()));
+        bad.send(Packet.attach(1, a.token()));
         bad.awaitEndMs(System.nanoTime());
-        assertEquals(ServerPhase.RESERVED, session(c).phase());
+        assertEquals(HostPhase.RESERVED, session(c).phase());
         activate(c, a); // same token, right version
-        assertEquals(ServerPhase.ACTIVE, session(c).phase());
+        assertEquals(HostPhase.ACTIVE, session(c).phase());
     }
 
     @Test
     void idleImageSocketClosedAtHandshakeDeadlineKeepsTokenUsable() throws Exception {
-        // the in-process hand-over deadline branch is covered by ServerSessionAttachTest
-        ServerCore c = core(deadline(Duration.ofSeconds(5)));
+        // the in-process hand-over deadline branch is covered by HostSessionAttachTest
+        HostCore c = core(deadline(Duration.ofSeconds(5)));
         Authed a = auth(c);
         long start = System.nanoTime();
         Raw slow = raw(c.imgPort());
@@ -379,52 +439,52 @@ class ServerHandshakeIntegrationTest {
         } catch (IOException expected) {
             // the closed connection may refuse the write
         }
-        assertEquals(ServerPhase.RESERVED, session(c).phase());
+        assertEquals(HostPhase.RESERVED, session(c).phase());
         activate(c, a); // a fresh socket with the same token, in time
-        assertEquals(ServerPhase.ACTIVE, session(c).phase());
+        assertEquals(HostPhase.ACTIVE, session(c).phase());
     }
 
     @Test
     void wrongTokenAttachClosesOnlyThatSocket() throws Exception {
-        ServerCore c = core(timeouts(Duration.ofSeconds(5)));
+        HostCore c = core(timeouts(Duration.ofSeconds(5)));
         Authed a = auth(c);
         byte[] other = a.token().clone();
         other[0] ^= 0x7F;
         Raw wrong = raw(c.imgPort());
         wrong.send(Packet.attach(other));
         wrong.awaitEndMs(System.nanoTime());
-        assertFalse(ServerTestAccess.lifecycle(session(c)).isClosed());
+        assertFalse(HostTestAccess.lifecycle(session(c)).isClosed());
         activate(c, a);
-        assertEquals(ServerPhase.ACTIVE, session(c).phase());
+        assertEquals(HostPhase.ACTIVE, session(c).phase());
     }
 
     @Test
     void garbageOnImagePortClosesOnlyThatSocket() throws Exception {
-        ServerCore c = core(timeouts(Duration.ofSeconds(5)));
+        HostCore c = core(timeouts(Duration.ofSeconds(5)));
         Authed a = auth(c);
         Raw garbage = raw(c.imgPort());
         garbage.out.write(new byte[64]);
         garbage.out.write(0xFF);
         garbage.out.flush();
         garbage.awaitEndMs(System.nanoTime());
-        assertFalse(ServerTestAccess.lifecycle(session(c)).isClosed());
+        assertFalse(HostTestAccess.lifecycle(session(c)).isClosed());
         activate(c, a);
-        assertEquals(ServerPhase.ACTIVE, session(c).phase());
+        assertEquals(HostPhase.ACTIVE, session(c).phase());
     }
 
     // ---- close paths -----------------------------------------------------------------------
 
     @Test
     void disconnectPacketClosesWithHooksOutsideLock() throws Exception {
-        ServerCore c = core(timeouts(Duration.ofSeconds(5)));
+        HostCore c = core(timeouts(Duration.ofSeconds(5)));
         Authed a = auth(c);
         activate(c, a);
-        ServerSession s = session(c);
+        HostSession s = session(c);
         AtomicBoolean lockFreeInHook = new AtomicBoolean();
         CountDownLatch hookRan = new CountDownLatch(1);
-        ServerTestAccess.lifecycle(s).addCloseHook(() -> {
+        HostTestAccess.lifecycle(s).addCloseHook(() -> {
             // another thread needs the session lock: it can only finish if this hook does not hold it
-            Thread probe = new Thread(() -> ServerTestAccess.lifecycle(s).phase(), "test-lock-probe");
+            Thread probe = new Thread(() -> HostTestAccess.lifecycle(s).phase(), "test-lock-probe");
             probe.setDaemon(true);
             probe.start();
             try {
@@ -438,8 +498,8 @@ class ServerHandshakeIntegrationTest {
         a.cmd().send(Packet.disconnect(Packet.DisconnectReason.USER, "bye"));
         assertTrue(hookRan.await(WAIT_S, TimeUnit.SECONDS));
         assertTrue(lockFreeInHook.get(), "close hooks must run after the session lock is released");
-        ServerTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
-        assertEquals(Packet.DisconnectReason.USER, ServerTestAccess.lifecycle(s).closeInfo().orElseThrow().reason());
+        HostTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
+        assertEquals(Packet.DisconnectReason.USER, HostTestAccess.lifecycle(s).closeInfo().orElseThrow().reason());
     }
 
     @Test
@@ -449,7 +509,7 @@ class ServerHandshakeIntegrationTest {
             freeCmdPort = probe.getLocalPort();
         }
         try (ServerSocket occupied = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
-            ServerCore c = new ServerCore(config(fast(), freeCmdPort, occupied.getLocalPort()));
+            HostCore c = hostResources.core(config(fast(), freeCmdPort, occupied.getLocalPort()));
             cores.add(c);
             assertThrows(IOException.class, c::start);
         }
@@ -460,29 +520,31 @@ class ServerHandshakeIntegrationTest {
 
    @Test
     void noTrafficClosesAfterLiveness() throws Exception {
-        ServerCore c = core(timeouts(Duration.ofSeconds(5)));
+        HostCore c = core(timeouts(Duration.ofSeconds(5)));
         Authed a = auth(c);
-        ServerSession s = session(c);
+        HostSession s = session(c);
         CloseRecorder rec = new CloseRecorder(s);
         raw(c.imgPort()).send(Packet.attach(a.token())); // ATTACH is not a counted command packet
         long lastCountedAt = System.nanoTime(); // stamped just before the last packet the server counts
-        a.cmd().send(Packet.screenInfo(1920, 1080));
+        assertEquals(Packet.screenInfo(1920, 1080), a.cmd().readUntil(PacketType.SCREEN_INFO));
         a.cmd().readUntil(PacketType.SESSION_ACTIVE);
+        lastCountedAt = System.nanoTime();
+        a.cmd().send(Packet.pong(1));
         // the client now stays silent and never answers PING
         rec.await();
         assertEquals("liveness timeout", rec.info.message());
         assertEquals(Packet.DisconnectReason.TIMEOUT, rec.info.reason());
         assertWindow(ms(rec.decidedAtNanos - lastCountedAt), 800, 1400, "liveness decision");
-        ServerTestAccess.lifecycle(s).socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
+        HostTestAccess.lifecycle(s).socketsClosed().get(WAIT_S, TimeUnit.SECONDS);
         assertTrue(ms(System.nanoTime() - rec.decidedAtNanos) <= GRACE.toMillis() + SLACK_MS);
-        ServerTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
+        HostTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
     }
 
     // ---- wrong code ------------------------------------------------------------------------
 
     @Test
     void wrongCodeIsDelayedThenAnswered() throws Exception {
-        ServerCore c = core(timeouts(Duration.ofMillis(1500), Duration.ofSeconds(5), Duration.ofMillis(400)));
+        HostCore c = core(timeouts(Duration.ofMillis(1500), Duration.ofSeconds(5), Duration.ofMillis(400)));
         Raw cmd = raw(c.cmdPort());
         cmd.send(Packet.auth(wrongCode(c)));
         long sentAt = System.nanoTime();
@@ -492,7 +554,7 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void wrongCodeDelayNeverPushesTheReplyPastTheHandshakeDeadline() throws Exception {
-        ServerCore c = core(timeouts(Duration.ofMillis(600), Duration.ofSeconds(5), Duration.ofSeconds(5)));
+        HostCore c = core(timeouts(Duration.ofMillis(600), Duration.ofSeconds(5), Duration.ofSeconds(5)));
         Raw cmd = raw(c.cmdPort());
         long start = System.nanoTime();
         cmd.send(Packet.auth(wrongCode(c)));
@@ -503,7 +565,7 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void threeWrongCodesThenLockedOverSockets() throws Exception {
-        ServerCore c = core(fast());
+        HostCore c = core(fast());
         for (int i = 0; i < 3; i++) {
             Raw cmd = raw(c.cmdPort());
             cmd.send(Packet.auth(wrongCode(c)));
@@ -515,7 +577,7 @@ class ServerHandshakeIntegrationTest {
         assertTrue(c.sessions().current().isEmpty());
     }
 
-    private static String wrongCode(ServerCore c) {
+    private static String wrongCode(HostCore c) {
         String code = c.sessions().currentCode();
         return code.equals("000000") ? "000001" : "000000";
     }
@@ -523,15 +585,15 @@ class ServerHandshakeIntegrationTest {
     @Test
     void terminatedLeavesNoSessionThreads() throws Exception {
         Set<Thread> before = sessionThreads();
-        ServerCore c = core(timeouts(Duration.ofSeconds(5)));
+        HostCore c = core(timeouts(Duration.ofSeconds(5)));
         Authed a = auth(c);
         activate(c, a);
-        ServerSession s = session(c);
+        HostSession s = session(c);
         awaitTrue(() -> !newThreads(before).isEmpty(), "session threads to start");
         a.cmd().send(Packet.disconnect(Packet.DisconnectReason.USER, "bye"));
-        ServerTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
+        HostTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
         awaitTrue(() -> newThreads(before).isEmpty(), "session threads to exit");
-        assertEquals(0, ServerTestAccess.lifecycle(s).liveWorkers());
+        assertEquals(0, HostTestAccess.lifecycle(s).liveWorkers());
     }
 
     private static Set<Thread> sessionThreads() {
@@ -549,14 +611,30 @@ class ServerHandshakeIntegrationTest {
 
     @Test
     void tickerRegistrationsReturnToBaseline() throws Exception {
-        ServerCore c = core(timeouts(Duration.ofSeconds(5)));
+        HostCore c = core(timeouts(Duration.ofSeconds(5)));
         int baseline = c.tickerRegistrations();
         Authed a = auth(c);
         activate(c, a);
-        ServerSession s = session(c);
-        awaitTrue(() -> c.tickerRegistrations() == baseline + 3, "session, heartbeat and watchdog registrations");
+        HostSession s = session(c);
+        awaitTrue(() -> c.tickerRegistrations() == baseline + 4, "session, heartbeat and both write watchdog registrations");
         a.cmd().send(Packet.disconnect(Packet.DisconnectReason.USER, "bye"));
-        ServerTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
+        HostTestAccess.lifecycle(s).terminated().get(5, TimeUnit.SECONDS);
         assertEquals(baseline, c.tickerRegistrations());
+    }
+
+    @Test void v1AuthGetsBadVersionWithoutGuardMutation() throws Exception {
+        HostCore core = core(fast());
+        String code = core.sessions().currentCode();
+        for (int i = 0; i < 3; i++) {
+            Raw old = raw(core.cmdPort());
+            old.send(Packet.auth(1, wrongCode(core)));
+            assertEquals(Packet.AuthStatus.BAD_VERSION, old.read().authResultPayload().status());
+            old.awaitEndMs(System.nanoTime());
+            assertTrue(core.sessions().current().isEmpty());
+            assertEquals(code, core.sessions().currentCode());
+        }
+        Authed accepted = auth(core);
+        assertEquals(16, accepted.token().length);
+        assertEquals(HostPhase.RESERVED, session(core).phase());
     }
 }
