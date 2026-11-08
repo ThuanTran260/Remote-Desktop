@@ -149,6 +149,29 @@ class HostSessionLifecycleContractTest {
         }
     }
 
+    /**
+     * The command channel is the only channel the Host reads after the hand-over, so it is the only one that arms
+     * a read timeout. When the socket refuses the option the session must close synchronously with PROTOCOL_ERROR
+     * instead of running a reader that has no timeout.
+     */
+    @Test void commandHandoverClosesSessionWhenReadTimeoutSetterFails() throws Exception {
+        try (Fixture f = new Fixture()) {
+            Wire command = f.wire("command");
+            command.socket.failTimeout = true;
+            AtomicInteger setterCalls = new AtomicInteger();
+            command.socket.onTimeout = setterCalls::incrementAndGet;
+            assertTrue(f.session.attachCommandChannel(new PendingConnection(command.socket, s(1)),
+                    command.channel, s(1)));
+            // tx.after runs on the calling thread, so the close is already recorded when attach returns
+            assertEquals(1, setterCalls.get());
+            CloseInfo info = f.session.closeInfo().orElseThrow();
+            assertEquals(Packet.DisconnectReason.PROTOCOL_ERROR, info.reason());
+            assertEquals("cannot set read timeout", info.message());
+            assertFalse(info.sendDisconnect());
+            assertEquals(0, command.socket.timeout, "the failed setter must not record a timeout");
+        }
+    }
+
     @Test void gracefulCloseWaitsForFinalFlushAndSuppressesEcho() throws Exception {
         for (boolean send : new boolean[] {true, false}) {
             try (Fixture f = new Fixture()) {
