@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,6 +29,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -50,6 +52,16 @@ class ViewerSessionHandshakeEdgesTest {
     private static final Timeouts SHORT_IMAGE_READ = new Timeouts(TIMEOUTS.handshake(), TIMEOUTS.reserve(),
             TIMEOUTS.clientAuth(), TIMEOUTS.clientActivation(), TIMEOUTS.pingInterval(), TIMEOUTS.liveness(),
             TIMEOUTS.cmdSoTimeout(), TIMEOUTS.frameStall(), TIMEOUTS.frameTimeout(), Duration.ofMillis(500),
+            TIMEOUTS.cmdWriteLimit(), TIMEOUTS.imgWriteLimit(), TIMEOUTS.closeGrace(), TIMEOUTS.connect(),
+            TIMEOUTS.wrongCodeDelay(), TIMEOUTS.ipLock(), TIMEOUTS.tick());
+    /**
+     * {@link #TIMEOUTS} with the AUTH deadline pushed to one hour, far beyond any wait here. The command socket's
+     * read timeout (the fallback that also closes with "auth timeout") is the same one hour, so only a tick can
+     * end the AUTHENTICATING phase in a test that uses it.
+     */
+    private static final Timeouts TICK_ONLY_AUTH = new Timeouts(TIMEOUTS.handshake(), TIMEOUTS.reserve(),
+            Duration.ofHours(1), TIMEOUTS.clientActivation(), TIMEOUTS.pingInterval(), TIMEOUTS.liveness(),
+            TIMEOUTS.cmdSoTimeout(), TIMEOUTS.frameStall(), TIMEOUTS.frameTimeout(), TIMEOUTS.imgSoTimeout(),
             TIMEOUTS.cmdWriteLimit(), TIMEOUTS.imgWriteLimit(), TIMEOUTS.closeGrace(), TIMEOUTS.connect(),
             TIMEOUTS.wrongCodeDelay(), TIMEOUTS.ipLock(), TIMEOUTS.tick());
 
@@ -101,7 +113,12 @@ class ViewerSessionHandshakeEdgesTest {
 
     private ViewerSession client(RawPeer.Server rs, SocketConnector connector, ViewerHooks hooks,
             ScreenSource screen) {
-        ViewerConfig cfg = new ViewerConfig("127.0.0.1", rs.cmdPort(), rs.imgPort(), "123456", TIMEOUTS, clock);
+        return client(rs, TIMEOUTS, connector, hooks);
+    }
+
+    private ViewerSession client(RawPeer.Server rs, Timeouts timeouts, SocketConnector connector,
+            ViewerHooks hooks) {
+        ViewerConfig cfg = new ViewerConfig("127.0.0.1", rs.cmdPort(), rs.imgPort(), "123456", timeouts, clock);
         ViewerSession c = new ViewerSession(cfg, generations.incrementAndGet(), connector, hooks, idleTicker, scheduler, cleanup);
         clients.add(c);
         return c;
@@ -276,19 +293,25 @@ class ViewerSessionHandshakeEdgesTest {
     @Test
     void tickDecidesNothingBeforeTheHandshakeStartedOrBeforeTheDeadline() throws Exception {
         RawPeer.Server rs = rawServer();
-        ViewerSession c = client(rs);
+        ViewerSession c = client(rs, TICK_ONLY_AUTH, SocketConnector.DEFAULT, ViewerHooks.none());
+        long deadline = TICK_ONLY_AUTH.clientAuth().toNanos();
 
         c.tick(Long.MAX_VALUE / 2); // not started: no deadline is armed, however late the tick
         assertEquals(ViewerPhase.CONNECTING, c.phase());
         assertTrue(c.lifecycle().closeInfo().isEmpty());
 
         c.start();
-        acceptAuth(rs); // AUTHENTICATING with the deadline at 0 + clientAuth (10 s)
-        c.tick(s(9));
+        acceptAuth(rs); // AUTHENTICATING with the deadline at 0 + clientAuth (one hour, see TICK_ONLY_AUTH)
+        c.tick(deadline - s(1));
         assertEquals(ViewerPhase.AUTHENTICATING, c.phase(), "one second before the deadline");
         assertTrue(c.lifecycle().closeInfo().isEmpty());
 
-        c.tick(s(10));
+        c.tick(deadline);
+        // closeIf decides and records the close inside tick: nothing later (the socket read timeout, a wait) can
+        // supply this result, so a tick that does not close exactly at the deadline fails here.
+        assertTrue(c.lifecycle().closeInfo().isPresent(), "the tick at the deadline itself closes synchronously");
+        assertEquals(Packet.DisconnectReason.TIMEOUT, closeInfo(c).reason());
+        assertEquals("auth timeout", closeInfo(c).message());
         awaitTerminated(c);
         assertEquals(Packet.DisconnectReason.TIMEOUT, closeInfo(c).reason());
         assertEquals("auth timeout", closeInfo(c).message());
@@ -473,6 +496,46 @@ class ViewerSessionHandshakeEdgesTest {
         assertEquals("image read timeout", info.message());
         assertTrue(info.sendDisconnect());
         assertEquals(0, c.framesReceived());
+    }
+
+    /**
+     * Pins the order, not only the value: the image read timeout must already be armed when the image channel is
+     * published, because publishing it can start the frame reader at once (SESSION_ACTIVE may arrive first) and a
+     * timeout set while a read is blocked does not apply to that read. {@code afterAttachFlushed} runs on the
+     * connect worker after the setter and before the hand-over, so the socket's timeout is read right there.
+     */
+    @Test
+    void imageReadTimeoutIsArmedBeforeTheImageChannelIsPublished() throws Exception {
+        record AtHandover(int soTimeoutMs, boolean published) { }
+        RawPeer.Server rs = rawServer();
+        AtomicReference<java.net.Socket> imageSocket = new AtomicReference<>();
+        AtomicReference<ViewerSession> session = new AtomicReference<>();
+        CompletableFuture<AtHandover> atHandover = new CompletableFuture<>();
+        SocketConnector capturing = (socket, address, timeoutMs) -> {
+            if (address.getPort() == rs.imgPort()) imageSocket.set(socket);
+            SocketConnector.DEFAULT.connect(socket, address, timeoutMs);
+        };
+        // A failure inside the hook would only close the session, so the observation goes out through the future.
+        ViewerHooks observeAtHandover = new ViewerHooks(() -> {
+            try {
+                atHandover.complete(new AtHandover(imageSocket.get().getSoTimeout(),
+                        session.get().imageChannelReady()));
+            } catch (Throwable failure) {
+                atHandover.completeExceptionally(failure);
+            }
+        });
+        ViewerSession c = client(rs, TIMEOUTS, capturing, observeAtHandover);
+        session.set(c);
+        c.start();
+
+        attaching(rs); // AUTH_RESULT(OK), SCREEN_INFO and ATTACH: the hook runs once ATTACH has been flushed
+
+        AtHandover seen = atHandover.get(WAIT_S, TimeUnit.SECONDS);
+        assertFalse(seen.published(), "the hook observes the socket before the image channel is handed over");
+        assertEquals(TIMEOUTS.imgSoTimeout().toMillis(), seen.soTimeoutMs(),
+                "the image read timeout is armed before the image channel is published or read");
+        c.cancel();
+        awaitTerminated(c);
     }
 
     // ---- SESSION_ACTIVE out of turn ------------------------------------------------------------------
