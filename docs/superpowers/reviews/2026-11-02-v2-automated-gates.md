@@ -2,6 +2,8 @@
 
 Mốc refresh: **2026-11-08**, SHA code cuối **`e49c907b91244fbe02e3892b8c6497521cace0c9`** (nhánh `feat/wave3-4-desktop-v1`). Đây là bản tổng hợp bằng chứng đã có thật; **không phải** nghiệm thu GĐ2, review cuối, hay xác nhận merge-ready. Desktop gate, H1, H2 **CHƯA CHẠY** và Astra **chưa review** các commit sau `b6883e8` (xem bảng trạng thái ở cuối). Mỗi con số gắn với đúng SHA ghi cạnh nó; **full PIT chạy ở `bd7c5b6`, không phải ở `e49c907`** (xem mục độ lệch SHA của PIT). Kết quả ở `8f1f701` được giữ bên dưới như **lịch sử có ghi ngày**, không phải trạng thái hiện hành. Nếu source/test/config hay artifact build đổi, ghi SHA/fingerprint mới và kiểm lại phạm vi bị ảnh hưởng. Báo cáo ngắn của đợt đóng gói: [closeout 2026-11-08](../reports/2026-11-08-host-viewer-closeout.md).
 
+> **Cập nhật 2026-11-10.** Chủ dự án xác nhận đã test thủ công H1/H2 v2 trên máy thật và nghiệm thu thủ công hoàn thành; các dòng "CHƯA CHẠY" và "chưa nghiệm thu" về H1/H2 bên dưới phản ánh trạng thái tài liệu ngày 2026-11-08, chưa được cập nhật lúc đó. Đây là xác nhận của chủ dự án, không kèm nhật ký chạy chi tiết trong kho mã. PR #3 đã được merge vào `main` thành `cd63fcf` ngày 2026-11-08, nên các câu "chưa merge" bên dưới cũng là trạng thái trước merge. `./mvnw -B -ntp verify` tại `cd63fcf` ngày 2026-11-10 (JDK 24.0.2): BUILD SUCCESS, 1243 test, 0 failure/error/skip, JaCoCo đạt. Xác nhận này **không** bao phủ desktop gate tự động (năm ca `TwoJvmIntegrationTest`), PIT chạy lại ở SHA cuối, review cuối của các commit sau `b6883e8` và các mục v3; trạng thái của chúng giữ nguyên. Chi tiết: [bản ghi 2026-11-10](../reports/2026-11-10-host-viewer-manual-acceptance.md).
+
 [README](../../../README.md) ghi vai/CLI/port hiện hành; [spec Host/Viewer](../specs/2026-11-01-host-viewer-design.md) và [UI/CLI/H2](../specs/2026-11-02-host-viewer-ui-cli-h2-design.md) ghi hợp đồng đã duyệt. [Test map](2026-11-02-v2-test-map.md) giữ truy vết lịch sử và tên sau B2. Không dùng trạng thái thiết kế hoặc PASS v1 thay nghiệm thu v2.
 
 ## Code đã được nhận theo đợt và provenance
@@ -81,6 +83,8 @@ Các liên kết `.superpowers` là **artifact ignored cục bộ** tại checko
 **Packaged headless launcher tại `e49c907`.** Một script duy nhất, cùng môi trường Temurin 21 (đặt `JAVA_HOME`/`PATH` chỉ cho process con), chạy `./mvnw.cmd -v` rồi `./mvnw.cmd -B -ntp clean package -DskipTests`. `mvnw -v` báo `Java version: 21.0.13, vendor: Eclipse Adoptium`, Maven **3.9.12**; build exit **0**. JAR SHA-256 **`6a2c7314436839faed91be480f9a5e90617b79b4a4faa486a5e3e9a687e18252`**, **282354 byte**. `java -Djava.awt.headless=true -jar target/remote-desktop.jar --help` exit **0**, `--server` exit **2**, `--role viewer` exit **4**; cả ba khớp mong đợi. Đây là kiểm launcher trên một máy, không phải H2. Bằng chứng: [execution.json](../../../.superpowers/sdd/2026-11-07-host-viewer-closeout/jar-e49c907-jdk21/execution.json), [mvnw-v.stdout.txt](../../../.superpowers/sdd/2026-11-07-host-viewer-closeout/jar-e49c907-jdk21/mvnw-v.stdout.txt), [package.stdout.log](../../../.superpowers/sdd/2026-11-07-host-viewer-closeout/jar-e49c907-jdk21/package.stdout.log). Receipt này **thay thế** receipt JAR của T7 ở `8f1f701`: `mavenVersionOutput` của T7 hiển thị Java 24.0.2 (T8 nêu), và receipt cũ đó **vẫn chưa được xác minh**.
 
 **CHƯA CHẠY (không thay thế bằng bất kỳ gate headless nào ở trên):** desktop gate (Robot, hai JVM), H1, H2 (30 phút ACTIVE + 50 vòng connect/disconnect MỖI hướng).
+
+*Cập nhật 2026-11-10: H1/H2 đã được chủ dự án xác nhận nghiệm thu thủ công hoàn thành (xem [bản ghi](../reports/2026-11-10-host-viewer-manual-acceptance.md)); desktop gate tự động (Robot, hai JVM) vẫn CHƯA CHẠY.*
 
 ## Lịch sử: bằng chứng hoàn tất tại `8f1f701` (không phải SHA hiện hành)
 
@@ -169,10 +173,12 @@ Lượt full verify trước ở `525be7c` vẫn **THẤT BẠI**, native exit *
 | Full PIT | HOÀN TẤT THỰC THI ở `bd7c5b6`, native 0; **không chạy lại ở `e49c907`** (độ lệch SHA đã được người dùng duyệt) | 436 = 343 KILLED + 84 TIMED_OUT + 7 SURVIVED + 2 NO_COVERAGE; XML được theo dõi; **chưa là mutation acceptance** |
 | Xét mutant (đọc tĩnh) | HOÀN TẤT, còn giới hạn | 93 không KILLED: EQUIVALENT 9 (một mục là ngoại lệ DEBUG), TIMEOUT-REAL 83, UNRESOLVED 1, GAP 0; TIMEOUT-REAL chưa xác lập bằng thực nghiệm |
 | Năm ca desktop hai JVM/Robot | **CHƯA CHẠY** | Như bảng lịch sử bên dưới |
-| H1/H2 v2 | **CHƯA CHẠY** | **30 phút ACTIVE + 50 connect/disconnect MỖI hướng**, hai Windows thật |
+| H1/H2 v2 | **CHƯA CHẠY** tại 2026-11-08; chủ dự án xác nhận nghiệm thu thủ công hoàn thành ngày 2026-11-10 (xem cập nhật dưới bảng) | **30 phút ACTIVE + 50 connect/disconnect MỖI hướng**, hai Windows thật |
 | Review cuối Astra | Chỉ tới `b6883e8` | Astra T8 không bao phủ `a866fc3`, `bd7c5b6`, `e49c907` và tài liệu này; chưa có review lại |
 
 Không có mục nào ở trên là nghiệm thu GĐ2 hay xác nhận merge-ready.
+
+**Cập nhật 2026-11-10.** Dòng H1/H2 ở bảng trên và câu "Không có mục nào ở trên là nghiệm thu GĐ2 hay xác nhận merge-ready" phản ánh trạng thái ngày 2026-11-08. Ngày 2026-11-10 chủ dự án xác nhận đã test thủ công H1/H2 v2 trên máy thật và nghiệm thu thủ công hoàn thành; kho mã không lưu nhật ký chạy chi tiết (ngày chạy, hai máy, kết quả từng ca, số đo) và bảng này không ghi số liệu nào cho lượt đó. PR #3 đã được merge vào `main` thành `cd63fcf` ngày 2026-11-08, nên "chưa merge" không còn đúng; việc merge không thay đổi các dòng khác của bảng. Các dòng năm ca desktop, Full PIT (không chạy lại ở SHA cuối), xét mutant và review cuối Astra **không** thuộc xác nhận của chủ dự án và giữ nguyên. Bản ghi: [2026-11-10](../reports/2026-11-10-host-viewer-manual-acceptance.md).
 
 ## Trạng thái gate lịch sử tại `8f1f701` (không phải hiện hành)
 
@@ -191,3 +197,5 @@ Không có mục nào ở trên là nghiệm thu GĐ2 hay xác nhận merge-read
 Sáu mẫu v2 vẫn để trống/CHƯA CHẠY cho run, người chạy, giờ, SHA build-final, dirty state, Windows/JDK/monitor/DPI, artifact và JAR A/B digest đúng lượt hai máy. Bằng chứng JAR headless một máy ở trên không điền thay các trường đó. H1/H2 và năm ca desktop vẫn cần native evidence riêng; không có headless/JAR/race/PIT substitution.
 
 Host là máy bị điều khiển, lắng nghe TCP **5001 lệnh/5000 ảnh**, hiện mã và SharingBar; Viewer là máy điều khiển, kết nối/nhận frame và dùng ControlFrame. `--address` chỉ preset Viewer, không auto-connect; legacy bị từ chối; không PIN argv/log. Wire **v2 không phải Internet relay**; **FRAME_ACK/freshness vẫn thuộc v3 tương lai**, native codec ngoài đợt này. **GĐ2 chưa được nghiệm thu đầy đủ, chưa merge-ready**: mutation acceptance, desktop/H1/H2 và final Astra còn thiếu.
+
+*Cập nhật 2026-11-10: câu trên là trạng thái ngày 2026-11-08. H1/H2 đã được chủ dự án xác nhận nghiệm thu thủ công hoàn thành và PR #3 đã merge (`cd63fcf`); mutation acceptance, desktop gate tự động và review cuối Astra của các commit sau `b6883e8` vẫn chưa có trong bản ghi. Xem [bản ghi 2026-11-10](../reports/2026-11-10-host-viewer-manual-acceptance.md).*

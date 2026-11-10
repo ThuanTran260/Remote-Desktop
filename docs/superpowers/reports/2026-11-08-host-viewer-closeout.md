@@ -2,6 +2,8 @@
 
 Ngày 2026-11-08, nhánh `feat/wave3-4-desktop-v1`, SHA code cuối: **`e49c907b91244fbe02e3892b8c6497521cace0c9`**. Báo cáo này ghi các gate tự động đã chạy thật và phần chưa làm. **Không phải** nghiệm thu GĐ2, review cuối hay xác nhận merge-ready, và không tuyên bố hoàn tất giai đoạn. Bảng đầy đủ và liên kết bằng chứng nằm ở [báo cáo gate v2](../reviews/2026-11-02-v2-automated-gates.md); các liên kết `.superpowers` là artifact ignored cục bộ.
 
+> **Cập nhật 2026-11-10.** Báo cáo này mô tả trạng thái ngày 2026-11-08 và được giữ nguyên làm lịch sử. Từ đó: PR #3 đã được merge vào `main` thành `cd63fcf` ngày 2026-11-08 (nên câu "Không có push, merge…" ở cuối không còn đúng), và chủ dự án xác nhận ngày 2026-11-10 rằng H1/H2 đã được test thủ công trên máy thật và nghiệm thu thủ công hoàn thành. Xác nhận này không kèm nhật ký chạy chi tiết trong kho mã và không bao phủ desktop gate tự động, PIT ở SHA cuối hay review cuối. Xem [bản ghi 2026-11-10](2026-11-10-host-viewer-manual-acceptance.md).
+
 ## Thay đổi sau phạm vi review T8 (`e7c0940..b6883e8`)
 
 - `a866fc3` (fix): Viewer đặt image read timeout; Host không đặt timeout trên socket ảnh chỉ gửi (finding I1).
@@ -48,8 +50,8 @@ Giữ làm lịch sử có ghi ngày; không dùng thay số của `e49c907`/`bd
 ## Chưa làm (CHƯA CHẠY)
 
 - **Desktop gate:** năm ca Robot/hai JVM (`TwoJvmIntegrationTest`).
-- **H1 và H2:** hai Windows thật, **30 phút ACTIVE + 50 vòng connect/disconnect MỖI hướng**.
+- **H1 và H2:** hai Windows thật, **30 phút ACTIVE + 50 vòng connect/disconnect MỖI hướng**. *(Cập nhật 2026-11-10: chủ dự án xác nhận đã test thủ công và nghiệm thu hoàn thành; xem [bản ghi](2026-11-10-host-viewer-manual-acceptance.md).)*
 - **Astra review lại** `a866fc3`, `bd7c5b6`, `e49c907` và tài liệu này.
 - **Full PIT tại `e49c907`:** không chạy (độ lệch SHA ở trên).
 - Chưa kiểm chứng: Linux/native, và nguyên nhân thực nghiệm của các TIMED_OUT.
-- Không có push, merge hay tuyên bố nghiệm thu, merge-ready hay hoàn tất giai đoạn.
+- Không có push, merge hay tuyên bố nghiệm thu, merge-ready hay hoàn tất giai đoạn. *(Cập nhật 2026-11-10: PR #3 đã merge vào `main` thành `cd63fcf` ngày 2026-11-08; các mục còn lại của danh sách này, ngoài H1/H2, giữ nguyên.)*

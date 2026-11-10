@@ -35,7 +35,7 @@ Cần JDK 21 trở lên; Maven Wrapper có sẵn, CI dùng JDK 21.
 .\mvnw.cmd -B -ntp verify
 ```
 
-Build tạo `target/remote-desktop.jar`. Test tự động chạy headless bằng adapter giả và socket loopback. Chúng không chứng nhận Robot, focus, DPI hay mạng thật trên hai Windows desktop. H1/H2 v2, gồm 30 phút và 50 vòng kết nối mỗi hướng, vẫn cần bằng chứng nghiệm thu riêng.
+Build tạo `target/remote-desktop.jar`. Test tự động chạy headless bằng adapter giả và socket loopback. Chúng không chứng nhận Robot, focus, DPI hay mạng thật trên hai Windows desktop. Nghiệm thu thủ công H1/H2 v2 trên máy thật đã được chủ dự án xác nhận hoàn thành ngày 2026-11-10; kho mã không lưu nhật ký chạy chi tiết (xem [bản ghi xác nhận](docs/superpowers/reports/2026-11-10-host-viewer-manual-acceptance.md)).
 
 ## Chạy
 
@@ -67,7 +67,7 @@ Host sở hữu SharingBar không nhận focus, mã và nút Dừng. Viewer sở
 - `viewer/`: ViewerSession, kết nối, frame receiver, gate/epoch, control state.
 - `ui/`: Controller/Snapshot, runtime, HostFrame/ViewerFrame, form state và capture trên EDT.
 
-Trạng thái theo SHA và các gate còn thiếu: [báo cáo gate v2 tập trung](docs/superpowers/reviews/2026-11-02-v2-automated-gates.md). Bảng test được giữ trong [test map](docs/superpowers/reviews/2026-11-02-v2-test-map.md). GĐ2 chưa được nghiệm thu đầy đủ.
+Trạng thái theo SHA và các gate còn thiếu: [báo cáo gate v2 tập trung](docs/superpowers/reviews/2026-11-02-v2-automated-gates.md). Bảng test được giữ trong [test map](docs/superpowers/reviews/2026-11-02-v2-test-map.md). PR #3 đã được merge vào `main` (`cd63fcf`, 2026-11-08). Nghiệm thu thủ công GĐ2 đã được chủ dự án xác nhận ngày 2026-11-10; desktop gate tự động, PIT ở SHA cuối và review cuối chưa thuộc xác nhận đó, xem [bản ghi 2026-11-10](docs/superpowers/reports/2026-11-10-host-viewer-manual-acceptance.md).
 
 [Thiết kế Host/Viewer v2](docs/superpowers/specs/2026-11-01-host-viewer-design.md) và [hợp đồng UI/CLI/H2](docs/superpowers/specs/2026-11-02-host-viewer-ui-cli-h2-design.md) là đặc tả hiện hành.
 
